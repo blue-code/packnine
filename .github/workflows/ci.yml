@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python ${{ matrix.python-version }} 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 의존성 설치 (개발용 포함)
+        run: pip install -e ".[dev]"
+
+      - name: 테스트 실행 (Ubuntu, PySide6는 headless로 실행)
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest
+
+      - name: 테스트 실행 (Windows)
+        if: runner.os == 'Windows'
+        run: pytest
+
+  pip-audit:
+    name: 의존성 취약점 스캔 (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치 (개발용 포함)
+        run: pip install -e ".[dev]"
+
+      - name: pip-audit 실행 (알려진 CVE 스캔, 실패해도 워크플로는 계속 진행)
+        continue-on-error: true
+        run: pip-audit

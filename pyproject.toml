@@ -1,0 +1,39 @@
+[project]
+name = "packnine"
+version = "0.1.0"
+description = "PackNine - 오리지널 Windows 압축/해제 데스크톱 프로그램 (ZIP/7Z/TAR/RAR)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Kent" }]
+dependencies = [
+    "PySide6>=6.7,<7",
+    "py7zr>=1.1.3,<2",
+    "rarfile>=4.2,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-qt>=4.4",
+    "pip-audit>=2.7",
+]
+assets = [
+    "Pillow>=10",
+]
+
+[project.scripts]
+packnine = "packnine.presentation.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["packnine*"]
+
+[tool.setuptools.package-data]
+packnine = ["presentation/gui/assets/*.ico", "presentation/gui/assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
