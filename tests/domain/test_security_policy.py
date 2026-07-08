@@ -156,6 +156,73 @@ class TestValidateManifest:
         assert policy.max_total_uncompressed_size == 10 * 1024 * 1024 * 1024
 
 
+class TestAlternateDataStreamRejection:
+    """NTFS ADS(Alternate Data Stream) 삽입 방지 - 엔트리명에 ':'가 섞여 있으면
+    "normal.txt:evil.exe" 같은 형태로 파일이 아닌 대체 스트림에 쓰여 탐지를 피해
+    숨겨진 실행파일이 생성될 수 있다(RAR ADS 처리 관련 CVE-2025-8088류와 동일한 클래스)."""
+
+    @pytest.mark.parametrize(
+        "malicious_name",
+        [
+            "normal.txt:evil.exe",
+            "sub/dir/report.docx:hidden.dll",
+            "a:b:c",
+        ],
+    )
+    def test_entry_name_with_colon_is_rejected(
+        self, policy: ArchiveSecurityPolicy, destination_root: pathlib.Path, malicious_name: str
+    ):
+        entry = ArchiveEntry(name=malicious_name, size=10, compressed_size=5)
+        with pytest.raises(UnsafeArchiveEntryError):
+            policy.validate_entry(entry, destination_root)
+
+
+class TestEntryCountLimit:
+    """엔트리 개수 상한 - 압축비/전체용량은 정상이어도 파일 수가 지나치게 많으면
+    처리 자체가 리소스 고갈(DoS)로 이어질 수 있어 별도로 방어한다."""
+
+    def test_entry_count_within_limit_passes(self):
+        policy = ArchiveSecurityPolicy(max_entry_count=3)
+        entries = [ArchiveEntry(name=f"{i}.txt", size=1, compressed_size=1) for i in range(3)]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        policy.validate_manifest(manifest)  # 예외 없이 통과해야 함
+
+    def test_entry_count_exceeds_limit_raises(self):
+        policy = ArchiveSecurityPolicy(max_entry_count=3)
+        entries = [ArchiveEntry(name=f"{i}.txt", size=1, compressed_size=1) for i in range(4)]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        with pytest.raises(UnsafeArchiveEntryError) as exc_info:
+            policy.validate_manifest(manifest)
+        assert exc_info.value.entry_name == "__manifest__"
+
+    def test_default_entry_count_limit(self):
+        policy = ArchiveSecurityPolicy()
+        assert policy.max_entry_count == 100_000
+
+
+class TestEntryNameLengthLimit:
+    """비정상적으로 긴 엔트리 이름(경로) 방어 - 파일시스템/외부 도구 호출 시
+    예기치 못한 동작을 유발할 수 있는 병적인(pathological) 입력을 사전 차단한다."""
+
+    def test_normal_length_name_passes(
+        self, policy: ArchiveSecurityPolicy, destination_root: pathlib.Path
+    ):
+        entry = ArchiveEntry(name="normal_file.txt", size=1, compressed_size=1)
+        result = policy.validate_entry(entry, destination_root)
+        assert isinstance(result, pathlib.Path)
+
+    def test_excessively_long_name_rejected(
+        self, policy: ArchiveSecurityPolicy, destination_root: pathlib.Path
+    ):
+        entry = ArchiveEntry(name="a" * 2000 + ".txt", size=1, compressed_size=1)
+        with pytest.raises(UnsafeArchiveEntryError):
+            policy.validate_entry(entry, destination_root)
+
+    def test_default_entry_name_length_limit(self):
+        policy = ArchiveSecurityPolicy()
+        assert policy.max_entry_name_length == 1024
+
+
 class TestUnsafeArchiveEntryErrorMessage:
     def test_message_includes_entry_name_and_reason(self):
         error = UnsafeArchiveEntryError(entry_name="evil.exe", reason="경로 탈출 시도")

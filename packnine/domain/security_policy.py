@@ -23,10 +23,18 @@ class ArchiveSecurityPolicy:
         max_compression_ratio: float = 100.0,
         max_total_uncompressed_size: int = 10 * 1024 * 1024 * 1024,
         allow_symlinks: bool = False,
+        max_entry_count: int = 100_000,
+        max_entry_name_length: int = 1024,
     ) -> None:
         self.max_compression_ratio = max_compression_ratio
         self.max_total_uncompressed_size = max_total_uncompressed_size
         self.allow_symlinks = allow_symlinks
+        # 압축비/전체용량이 정상 범위여도 엔트리 수가 지나치게 많으면(예: 빈 파일 수백만 개)
+        # 처리 자체가 리소스 고갈(DoS)로 이어질 수 있어 별도 상한을 둔다.
+        self.max_entry_count = max_entry_count
+        # 비정상적으로 긴 경로는 파일시스템/외부 도구 호출 시 예기치 못한 동작을 유발할 수
+        # 있는 병적인(pathological) 입력이므로 사전에 차단한다.
+        self.max_entry_name_length = max_entry_name_length
 
     def validate_entry(
         self, entry: ArchiveEntry, destination_root: pathlib.Path
@@ -34,11 +42,27 @@ class ArchiveSecurityPolicy:
         """엔트리를 검증하고, 통과하면 실제로 쓸 안전한 절대 경로를 반환한다."""
         name = entry.name
 
+        if len(name) > self.max_entry_name_length:
+            raise UnsafeArchiveEntryError(
+                name,
+                f"엔트리 이름 길이({len(name)})가 허용 상한"
+                f"({self.max_entry_name_length})을 초과합니다",
+            )
+
         # 절대경로/드라이브 문자는 destination_root와 결합해도 root를 무시하고
         # 임의 위치를 가리킬 수 있으므로 경로 결합 전에 먼저 명시적으로 차단한다.
         if self._is_absolute_or_drive(name):
             raise UnsafeArchiveEntryError(
                 name, "절대 경로 또는 드라이브 문자를 포함한 엔트리는 허용되지 않습니다"
+            )
+
+        # NTFS ADS(Alternate Data Stream) 삽입 방지: "normal.txt:evil.exe" 형태의 이름은
+        # 실제 파일이 아니라 normal.txt의 대체 스트림에 쓰여 탐지를 피한 채 임의 콘텐츠를
+        # 심을 수 있다(RAR의 ADS 처리 관련 취약점과 동일한 클래스). 드라이브 문자(예: "C:")는
+        # 위에서 이미 별도로 걸러지므로, 여기서는 그 외의 모든 콜론 포함 이름을 차단한다.
+        if ":" in name:
+            raise UnsafeArchiveEntryError(
+                name, "콜론(:)을 포함한 엔트리는 NTFS 대체 데이터 스트림(ADS)으로 악용될 수 있어 허용되지 않습니다"
             )
 
         if entry.is_symlink and not self.allow_symlinks:
@@ -75,7 +99,7 @@ class ArchiveSecurityPolicy:
         return candidate
 
     def validate_manifest(self, manifest: ArchiveManifest) -> None:
-        """전체 압축해제 용량이 상한을 넘는지 검사한다."""
+        """전체 압축해제 용량/엔트리 개수가 상한을 넘는지 검사한다."""
         total = manifest.total_uncompressed_size
         if total > self.max_total_uncompressed_size:
             raise UnsafeArchiveEntryError(
@@ -83,6 +107,16 @@ class ArchiveSecurityPolicy:
                 reason=(
                     f"전체 압축해제 용량({total} bytes)이 허용 상한"
                     f"({self.max_total_uncompressed_size} bytes)을 초과합니다"
+                ),
+            )
+
+        entry_count = len(manifest.entries)
+        if entry_count > self.max_entry_count:
+            raise UnsafeArchiveEntryError(
+                entry_name="__manifest__",
+                reason=(
+                    f"엔트리 개수({entry_count})가 허용 상한"
+                    f"({self.max_entry_count})을 초과합니다(리소스 고갈 방지)"
                 ),
             )
 

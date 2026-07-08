@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pathlib
 
+from packnine.application import smart_naming
 from packnine.domain.entities import ArchiveManifest
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.value_objects import CompressionLevel
@@ -49,3 +50,25 @@ class CompressService:
             reader.close()
 
         return ArchiveManifest(entries=entries, format_name=destination.suffix)
+
+    def smart_compress(
+        self,
+        source_paths: list[pathlib.Path],
+        *,
+        password: str | None = None,
+        compression_level: CompressionLevel = CompressionLevel.NORMAL,
+        on_progress: ProgressCallback | None = None,
+    ) -> ArchiveManifest:
+        """반디집 "알아서 압축"처럼 목적지 경로를 자동으로 정해 바로 압축한다.
+
+        목적지 이름 결정 규칙은 smart_naming에 위임하고, 실제 압축은 기존 compress()를
+        그대로 재사용한다(로직 중복 금지).
+        """
+        destination = smart_naming.resolve_smart_compress_destination(source_paths)
+        return self.compress(
+            source_paths,
+            destination,
+            password=password,
+            compression_level=compression_level,
+            on_progress=on_progress,
+        )

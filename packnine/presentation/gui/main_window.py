@@ -27,6 +27,11 @@ from packnine.application.extract_service import ExtractService
 from packnine.application.inspect_service import InspectService
 from packnine.domain.entities import ArchiveManifest
 from packnine.domain.exceptions import UnsafeArchiveEntryError
+from packnine.presentation.gui.image_viewer import ImageViewerDialog, is_image_name
+
+# 이미지 미리보기를 위해 한 번에 임시 폴더로 미리 꺼내둘 이미지 개수 상한.
+# 이미지가 매우 많은 아카이브에서 더블클릭 한 번에 전부 해제하느라 오래 걸리는 것을 막는다.
+_MAX_PREVIEW_IMAGES = 200
 
 # 아카이브로 인식할 확장자 - 드래그앤드롭 시 압축 대상 파일인지 아카이브인지
 # 구분하는 데 사용한다 (format_registry의 지원 확장자와 동일해야 하지만,
@@ -73,10 +78,13 @@ class MainWindow(QMainWindow):
 
         # 현재 열려있는 아카이브 경로 - "압축풀기"/"테스트" 액션이 대상으로 사용한다.
         self._current_archive_path: pathlib.Path | None = None
+        # 더블클릭한 행이 어떤 엔트리인지 알아야 이미지 뷰어를 열 수 있어 목록도 보관한다.
+        self._current_manifest: ArchiveManifest | None = None
 
         self._table = QTableWidget(0, len(_TABLE_HEADERS))
         self._table.setHorizontalHeaderLabels(_TABLE_HEADERS)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.cellDoubleClicked.connect(self._on_table_double_clicked)
         self.setCentralWidget(self._table)
 
         self._build_toolbar()
@@ -211,12 +219,64 @@ class MainWindow(QMainWindow):
             self._populate_table(manifest)
 
     def _populate_table(self, manifest: ArchiveManifest) -> None:
+        self._current_manifest = manifest
         self._table.setRowCount(len(manifest.entries))
         for row, entry in enumerate(manifest.entries):
             self._table.setItem(row, 0, QTableWidgetItem(entry.name))
             self._table.setItem(row, 1, QTableWidgetItem(str(entry.size)))
             self._table.setItem(row, 2, QTableWidgetItem(str(entry.compressed_size)))
             self._table.setItem(row, 3, QTableWidgetItem(f"{entry.compression_ratio:.2f}"))
+
+    # ------------------------------------------------------------------
+    # 내장 이미지 뷰어
+    # ------------------------------------------------------------------
+    def _on_table_double_clicked(self, row: int, _column: int) -> None:
+        if self._current_manifest is None or self._current_archive_path is None:
+            return
+        if row < 0 or row >= len(self._current_manifest.entries):
+            return
+        entry = self._current_manifest.entries[row]
+        if entry.is_dir or not is_image_name(entry.name):
+            return
+        self._open_image_viewer(clicked_entry_name=entry.name)
+
+    def _open_image_viewer(self, clicked_entry_name: str) -> None:
+        assert self._current_manifest is not None
+        assert self._current_archive_path is not None
+
+        image_entries = [
+            e for e in self._current_manifest.entries if not e.is_dir and is_image_name(e.name)
+        ]
+        if not image_entries:
+            return
+        if len(image_entries) > _MAX_PREVIEW_IMAGES:
+            image_entries = image_entries[:_MAX_PREVIEW_IMAGES]
+
+        temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="packnine_preview_"))
+        try:
+            entry_names = [e.name for e in image_entries]
+            self._extract_service.extract_entries(
+                self._current_archive_path, entry_names, temp_dir
+            )
+        except UnsafeArchiveEntryError as exc:
+            self._show_security_warning(exc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._show_error(exc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return
+
+        try:
+            image_paths = [temp_dir / e.name for e in image_entries]
+            start_index = next(
+                (i for i, e in enumerate(image_entries) if e.name == clicked_entry_name), 0
+            )
+            dialog = ImageViewerDialog(image_paths, start_index=start_index, parent=self)
+            dialog.exec()
+        finally:
+            # 미리보기용으로 임시로 꺼낸 것이므로 뷰어를 닫으면 항상 정리한다.
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _make_progress_dialog(self, label: str) -> QProgressDialog:
         progress = QProgressDialog(label, "취소", 0, 100, self)

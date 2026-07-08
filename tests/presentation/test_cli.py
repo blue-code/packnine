@@ -68,6 +68,95 @@ def test_extract_missing_archive_returns_exit_code_1_with_friendly_message(tmp_p
     assert captured.err.strip() != ""
 
 
+def test_smart_compress_single_file_uses_stem_name(tmp_path, capsys, monkeypatch):
+    # 콘솔이 연결되어 있는 상황(터미널에서 직접 실행)을 흉내내 텍스트 출력 분기를 탄다.
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    report = src_dir / "report.docx"
+    report.write_text("dummy content", encoding="utf-8")
+
+    exit_code = main(["smart-compress", str(report)])
+
+    assert exit_code == 0
+    expected_destination = src_dir / "report.zip"
+    assert expected_destination.exists()
+    output = capsys.readouterr().out
+    assert "압축 완료" in output
+    assert str(expected_destination) in output
+
+
+def test_smart_extract_multiple_archives_each_processed(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    src_dir = _make_source_tree(tmp_path)
+    archive_a = tmp_path / "out_a.zip"
+    archive_b = tmp_path / "out_b.zip"
+    assert main(["compress", str(src_dir), "-o", str(archive_a)]) == 0
+    assert main(["compress", str(src_dir), "-o", str(archive_b)]) == 0
+    capsys.readouterr()
+
+    exit_code = main(["smart-extract", str(archive_a), str(archive_b)])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert f"성공: {archive_a}" in output
+    assert f"성공: {archive_b}" in output
+    # 소스 트리 자체가 유일한 최상위 항목이므로 아카이브와 같은 폴더 아래 src_dir.name으로 풀린다.
+    assert (tmp_path / src_dir.name / "a.txt").exists()
+
+
+def test_smart_extract_continues_after_one_failure(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    src_dir = _make_source_tree(tmp_path)
+    good_archive = tmp_path / "good.zip"
+    assert main(["compress", str(src_dir), "-o", str(good_archive)]) == 0
+    capsys.readouterr()
+
+    missing_archive = tmp_path / "does_not_exist.zip"
+
+    exit_code = main(["smart-extract", str(missing_archive), str(good_archive)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert f"실패: {missing_archive}" in output
+    assert f"성공: {good_archive}" in output
+
+
+def test_register_context_menu_calls_service(monkeypatch, capsys):
+    from packnine.application.context_menu_service import ContextMenuService
+
+    calls = []
+    monkeypatch.setattr(ContextMenuService, "register", lambda self: calls.append("register"))
+    monkeypatch.setattr(ContextMenuService, "unregister", lambda self: calls.append("unregister"))
+
+    assert main(["register-context-menu"]) == 0
+    assert calls == ["register"]
+    assert "등록했습니다" in capsys.readouterr().out
+
+    assert main(["register-context-menu", "--unregister"]) == 0
+    assert calls == ["register", "unregister"]
+    assert "제거했습니다" in capsys.readouterr().out
+
+
+def test_register_context_menu_failure_returns_friendly_error(monkeypatch, capsys):
+    from packnine.application.context_menu_service import ContextMenuService
+
+    def _boom(self):
+        raise RuntimeError("레지스트리 접근 실패")
+
+    monkeypatch.setattr(ContextMenuService, "register", _boom)
+
+    exit_code = main(["register-context-menu"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "레지스트리 접근 실패" in captured.err
+
+
 def test_compress_with_password(tmp_path, capsys):
     src_dir = _make_source_tree(tmp_path)
     archive_path = tmp_path / "secure.zip"

@@ -84,3 +84,35 @@ def test_compress_accepts_compression_level(tmp_path: pathlib.Path) -> None:
 
     assert destination.exists()
     assert isinstance(manifest, ArchiveManifest)
+
+
+def test_smart_compress_single_folder_names_archive_after_folder(tmp_path: pathlib.Path) -> None:
+    src_dir = make_sample_source_tree(tmp_path, name="myphotos")
+    service = CompressService()
+
+    manifest = service.smart_compress([src_dir])
+
+    expected_destination = tmp_path / "myphotos.zip"
+    assert expected_destination.exists()
+    assert isinstance(manifest, ArchiveManifest)
+    file_entry_names = [e.name for e in manifest.entries if not e.is_dir]
+    assert len(file_entry_names) >= _expected_entry_count(src_dir)
+
+
+def test_smart_compress_multiple_files_names_archive_after_common_parent(
+    tmp_path: pathlib.Path,
+) -> None:
+    parent = tmp_path / "myfolder"
+    parent.mkdir()
+    a = parent / "a.txt"
+    a.write_text("hello a", encoding="utf-8")
+    b = parent / "b.txt"
+    b.write_text("hello b " * 20, encoding="utf-8")
+    service = CompressService()
+
+    manifest = service.smart_compress([a, b])
+
+    expected_destination = parent / "myfolder.zip"
+    assert expected_destination.exists()
+    file_entry_names = {e.name for e in manifest.entries if not e.is_dir}
+    assert {"a.txt", "b.txt"} <= file_entry_names
