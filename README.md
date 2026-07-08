@@ -41,7 +41,7 @@ pip install -e ".[dev]"
 
 Windows용 빌드된 실행 파일(exe)은 GitHub Release 페이지에서 내려받을 수 있습니다.
 
-(릴리즈 페이지 링크는 추후 추가)
+https://github.com/blue-code/packnine/releases
 
 ## 사용법
 
