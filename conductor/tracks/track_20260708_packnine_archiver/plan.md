@@ -84,3 +84,18 @@ Windows용 압축/해제 프로그램을 직접 개발하여 GitHub에 공개하
 - **리스크**: "반디집 수준 풀 기능"은 범위가 매우 넓어 1세션 내 100% 재현이 불가능함
   → Phase 1(핵심 MVP + 편의기능)까지 완성해 v0.1.0으로 릴리즈하고, 나머지는 GitHub Issue
   백로그로 문서화하여 로드맵을 투명하게 공개한다.
+
+## Approval Gate 체크리스트
+
+```yaml
+approval_checklist:
+  - [x] plan.md 작성 완료
+  - [x] analysis.md 작성 완료
+  - [x] implementation.md 방향 확정
+  - [x] 주요 리스크 문서화
+  - [x] 상위 track 정합성 확인 (최초 트랙이므로 해당 없음)
+  - [x] 영향도 매트릭스 작성 (해당 없음)
+```
+
+v0.1.0 릴리즈 완료로 위 체크리스트를 모두 충족해 `track_status: approved`로 확정한다.
+후속 작업은 review.md 참고.
