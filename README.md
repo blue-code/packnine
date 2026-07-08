@@ -16,14 +16,23 @@ ZIP, 7Z, TAR 계열(GZ/BZ2/XZ) 압축·해제와 RAR 해제를 지원하며, 설
 
 - **압축**: ZIP, 7Z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ
 - **해제**: 위 포맷 전체 + RAR(해제 전용)
-- **암호 설정**: ZIP/7Z 아카이브에 AES-256 암호화 적용
+- **암호 설정**: ZIP/7Z 아카이브에 AES-256 암호화 적용(7Z는 진짜 AES-256, ZIP은 표준
+  라이브러리 한계로 제한적)
 - **압축률 선택**: 저장/빠름/보통/최대 등 압축 레벨 선택
-- **GUI**: 드래그 앤 드롭, 파일 목록 트리/테이블 뷰, 압축 다이얼로그, 진행률 표시
+- **알아서 압축 / 알아서 압축풀기**: 목적지 경로·파일명을 다이얼로그 없이 자동으로 정해
+  바로 처리 (`smart-compress`/`smart-extract`)
+- **탐색기 우클릭 메뉴**: 설치 프로그램 또는 `packnine register-context-menu`로 등록하면
+  파일을 우클릭해 바로 압축/압축해제 가능(다중 선택 지원, 관리자 권한 불필요)
+- **내장 이미지 뷰어**: 아카이브를 열고 이미지 파일을 더블클릭하면 바로 미리보기
+  (이전/다음 탐색 지원)
+- **GUI**: 드래그 앤 드롭, 파일 목록 테이블 뷰, 압축 다이얼로그, 진행률 표시
 - **CLI**: GUI 없이 스크립트/배치 작업으로 압축·해제 가능
 - **보안 특징**
   - Zip Slip(경로 탈출) 방지 — 모든 엔트리 경로를 목적지 루트 하위인지 검증
-  - 압축 폭탄(Decompression Bomb) 방지 — 엔트리별/전체 압축비 및 총 용량 상한 검사
-  - 심볼릭 링크/절대경로 엔트리 기본 거부
+  - 압축 폭탄(Decompression Bomb) 및 대량 엔트리를 이용한 자원 고갈(DoS) 방지
+  - 심볼릭 링크/하드링크/절대경로/NTFS ADS(콜론 포함 이름) 엔트리 기본 거부
+  - 압축 해제 후 원본 아카이브의 MoTW(Mark of the Web) 정보를 해제된 파일에 전파해
+    SmartScreen 등 Windows 보호 기제가 계속 작동하도록 함
   - RAR은 자체 네이티브 파서를 구현하지 않고 `rarfile` + 신뢰할 수 있는 시스템
     `unrar`/`bsdtar` 바이너리에 위임
 
@@ -31,17 +40,25 @@ ZIP, 7Z, TAR 계열(GZ/BZ2/XZ) 압축·해제와 RAR 해제를 지원하며, 설
 
 ## 설치 방법
 
+### 설치 프로그램 사용 (권장)
+
+GitHub Release에서 `PackNine-Setup.exe`를 내려받아 실행하면 관리자 권한 없이
+`%LOCALAPPDATA%\Programs\PackNine`에 설치되고, 시작메뉴/바탕화면 바로가기와 탐색기
+우클릭 메뉴가 자동으로 등록됩니다.
+
+https://github.com/blue-code/packnine/releases
+
+### 포터블 실행 파일
+
+설치 없이 바로 쓰고 싶다면 같은 Release 페이지의 `PackNine.exe`(단일 실행 파일)를
+내려받아 원하는 위치에서 실행하면 됩니다. 우클릭 메뉴를 쓰려면
+`PackNine.exe register-context-menu`를 한 번 실행해주세요.
+
 ### 개발 환경으로 설치
 
 ```powershell
 pip install -e ".[dev]"
 ```
-
-### 릴리즈 실행 파일 다운로드
-
-Windows용 빌드된 실행 파일(exe)은 GitHub Release 페이지에서 내려받을 수 있습니다.
-
-https://github.com/blue-code/packnine/releases
 
 ## 사용법
 
@@ -60,17 +77,30 @@ packnine
 ### CLI 사용 예시
 
 ```powershell
-# 압축
-packnine compress --format zip -o output.zip file1.txt file2.txt folder\
+# 압축 (확장자로 포맷을 자동 판별)
+packnine compress file1.txt file2.txt folder -o output.zip
 
-# 암호를 지정하여 7z로 압축
-packnine compress --format 7z --password "안전한암호" -o output.7z folder\
+# 암호를 지정하여 7z로 압축 (진짜 AES-256 적용)
+packnine compress folder -o output.7z --password "안전한암호"
 
 # 해제
-packnine extract output.zip --dest .\extracted
+packnine extract output.zip -d .\extracted
 
 # RAR 해제 (시스템에 unrar 또는 bsdtar 필요)
-packnine extract archive.rar --dest .\extracted
+packnine extract archive.rar -d .\extracted
+
+# 알아서 압축: 목적지를 스스로 정해 바로 압축(단일 항목이면 그 이름, 여러 개면 폴더명 기준)
+packnine smart-compress file1.txt file2.txt
+
+# 알아서 압축풀기: 아카이브 안에 루트 항목이 하나뿐이면 바로, 여러 개면 새 폴더에 풀기
+packnine smart-extract output.zip
+
+# 아카이브 내용 목록 조회
+packnine list output.zip
+
+# 탐색기 우클릭 메뉴 등록/해제 (관리자 권한 불필요, HKCU에만 기록)
+packnine register-context-menu
+packnine register-context-menu --unregister
 ```
 
 > CLI 하위 명령/옵션은 개발 진행에 따라 변경될 수 있습니다. 최신 사용법은 `packnine --help`로
@@ -99,15 +129,19 @@ packnine/
 ├── application/           # 유스케이스 오케스트레이션
 │   ├── compress_service.py
 │   ├── extract_service.py
-│   └── inspect_service.py
+│   ├── inspect_service.py
+│   ├── smart_naming.py    # "알아서 압축/압축풀기" 목적지 자동 결정
+│   └── context_menu_service.py
 ├── infrastructure/        # 포맷별 어댑터 (외부 라이브러리 의존)
 │   ├── zip_adapter.py
 │   ├── sevenzip_adapter.py
 │   ├── tar_adapter.py
 │   ├── rar_adapter.py     # 해제 전용
-│   └── format_registry.py
+│   ├── format_registry.py
+│   ├── motw.py             # MoTW(Zone.Identifier) 전파
+│   └── context_menu.py     # 탐색기 우클릭 메뉴 등록/해제(winreg)
 ├── presentation/
-│   ├── gui/                # PySide6
+│   ├── gui/                # PySide6 (main_window, compress_dialog, image_viewer)
 │   └── cli.py               # argparse 기반 CLI 진입점
 └── main.py
 tests/
