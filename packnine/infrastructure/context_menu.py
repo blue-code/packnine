@@ -1,12 +1,22 @@
-"""Windows 탐색기 우클릭 컨텍스트 메뉴 등록/해제.
+"""Windows 탐색기 우클릭 컨텍스트 메뉴 등록/해제 + 파일 연결(더블클릭).
 
 관리자 권한이 필요 없도록 HKEY_CURRENT_USER 아래에만 키를 만든다(HKLM은 건드리지 않음).
 반디집의 "알아서 압축"/"알아서 압축풀기"처럼 다이얼로그 없이 바로 실행되도록
 smart-compress/smart-extract CLI 서브커맨드를 연결한다(목적지 경로는 CLI가 스스로 계산).
+
 - 범용 메뉴: 모든 파일 우클릭 시 "PackNine으로 압축하기" (Software\\Classes\\*\\shell)
-- 아카이브 전용 메뉴: .zip/.7z/.rar 우클릭 시 "PackNine으로 열기" (해당 확장자 키의 shell)
+- 아카이브 전용 메뉴: .zip/.7z/.rar/.tar/.tgz 우클릭 시 "PackNine으로 압축풀기"
+  (해당 확장자 키의 shell)
+- 두 메뉴는 서로 다른 verb 키 이름(PackNineCompress/PackNineExtract)을 쓴다. 같은 이름을
+  쓰면 탐색기가 "*"와 특정 확장자 양쪽에 등록된 동일 이름의 verb를 병합하면서 하나만
+  표시해 버리는 문제가 있었다(범용 "압축하기"만 보이고 아카이브 전용 "압축풀기"는
+  가려짐) - 실제로 이 버그가 발견되어 이름을 분리해 고쳤다.
 - 두 메뉴 모두 MultiSelectModel=Player를 등록해, 여러 항목을 선택해도 명령이 한 번만
   실행되고 %*로 선택된 모든 경로를 한꺼번에 전달받는다.
+- 파일 연결: PackNine.Archive라는 ProgID를 만들어 아카이브 확장자의 더블클릭 기본 동작을
+  "GUI로 열어 내용 보기"(open 서브커맨드)로 등록한다. 이미 다른 프로그램이 그 확장자의
+  기본 프로그램으로 지정돼 있었다면 그 값을 백업해두었다가 unregister() 시 그대로
+  복원한다(파일 연결을 영구적으로 빼앗지 않기 위함).
 
 설치 프로그램(installer.nsi)이 설치/제거 시 `PackNine.exe register-context-menu`와
 `--unregister`를 호출해 이 모듈의 register()/unregister()를 실행한다.
@@ -17,8 +27,13 @@ import pathlib
 import shutil
 import sys
 
-_MENU_KEY_NAME = "PackNine"
-_ARCHIVE_EXTENSIONS = (".zip", ".7z", ".rar")
+_COMPRESS_VERB = "PackNineCompress"
+_EXTRACT_VERB = "PackNineExtract"
+# .gz/.bz2/.xz는 tar가 아닌 순수 단일 파일 압축(비-tar)일 수도 있어 의미가 모호하므로
+# 파일 연결/우클릭 대상에서 제외한다. .tgz는 항상 tar+gzip을 의미하므로 안전하게 포함한다.
+_ARCHIVE_EXTENSIONS = (".zip", ".7z", ".rar", ".tar", ".tgz")
+_PROG_ID = "PackNine.Archive"
+_ASSOC_BACKUP_KEY = r"Software\PackNine\PreviousFileAssociations"
 
 
 def _require_windows() -> None:
@@ -47,12 +62,28 @@ def _resolve_packnine_command() -> str:
     return f'"{sys.executable}" -m packnine.main'
 
 
+def _resolve_icon_reference() -> str:
+    """DefaultIcon에 쓸 "경로,인덱스" 형태의 문자열을 만든다.
+
+    frozen exe는 자기 자신에 아이콘이 내장돼 있으므로 그 exe를 가리키고, 개발 환경에서는
+    패키지에 포함된 .ico 파일을 직접 가리킨다(둘 다 없으면 python.exe로 대체).
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}",0'
+
+    icon_path = pathlib.Path(__file__).resolve().parent.parent / "presentation" / "gui" / "assets" / "icon.ico"
+    if icon_path.exists():
+        return f'"{icon_path}",0'
+
+    return f'"{sys.executable}",0'
+
+
 def _create_menu_key(
-    parent_key_path: str, command: str, label: str, multi_select: bool = False
+    parent_key_path: str, verb: str, command: str, label: str, multi_select: bool = False
 ) -> None:
     import winreg
 
-    key_path = f"{parent_key_path}\\shell\\{_MENU_KEY_NAME}"
+    key_path = f"{parent_key_path}\\shell\\{verb}"
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, label)
         if multi_select:
@@ -66,11 +97,11 @@ def _create_menu_key(
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
 
 
-def _delete_menu_key(parent_key_path: str) -> None:
+def _delete_menu_key(parent_key_path: str, verb: str) -> None:
     import winreg
 
-    key_path = f"{parent_key_path}\\shell\\{_MENU_KEY_NAME}"
-    # command 하위 키부터 지워야 부모 키(shell\PackNine)를 지울 수 있다(자식이 남아있으면 실패).
+    key_path = f"{parent_key_path}\\shell\\{verb}"
+    # command 하위 키부터 지워야 부모 verb 키를 지울 수 있다(자식이 남아있으면 실패).
     try:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, f"{key_path}\\command")
     except FileNotFoundError:
@@ -81,8 +112,96 @@ def _delete_menu_key(parent_key_path: str) -> None:
         pass
 
 
+def _register_prog_id(open_command: str, icon_reference: str) -> None:
+    import winreg
+
+    prog_key = rf"Software\Classes\{_PROG_ID}"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, prog_key) as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "PackNine 압축 파일")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{prog_key}\DefaultIcon") as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_reference)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{prog_key}\shell\open\command") as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, open_command)
+
+
+def _unregister_prog_id() -> None:
+    import winreg
+
+    prog_key = rf"Software\Classes\{_PROG_ID}"
+    for sub in (
+        rf"{prog_key}\shell\open\command",
+        rf"{prog_key}\shell\open",
+        rf"{prog_key}\shell",
+        rf"{prog_key}\DefaultIcon",
+        prog_key,
+    ):
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
+        except FileNotFoundError:
+            pass
+
+
+def _read_current_default(ext: str) -> str | None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}") as key:
+            value, _ = winreg.QueryValueEx(key, "")
+            return value or None
+    except FileNotFoundError:
+        return None
+
+
+def _backup_and_set_default(ext: str) -> None:
+    """ext의 현재 기본 연결 프로그램을 백업해두고 PackNine을 기본값으로 설정한다."""
+    import winreg
+
+    previous = _read_current_default(ext)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _ASSOC_BACKUP_KEY) as key:
+        # 이미 우리가 등록해서 기본값이 우리 자신이면(재등록 케이스) 백업을 덮어쓰지
+        # 않아야 그 이전의 진짜 원래 프로그램 정보를 잃지 않는다.
+        if previous != _PROG_ID:
+            winreg.SetValueEx(key, ext, 0, winreg.REG_SZ, previous or "")
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}") as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, _PROG_ID)
+
+
+def _restore_default(ext: str) -> None:
+    """_backup_and_set_default()로 바꾸기 전의 기본 연결 프로그램을 복원한다."""
+    import winreg
+
+    previous: str | None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _ASSOC_BACKUP_KEY) as key:
+            previous, _ = winreg.QueryValueEx(key, ext)
+    except (FileNotFoundError, OSError):
+        previous = None
+
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}") as key:
+            if previous:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, previous)
+            else:
+                # 원래 기본값이 없었으면(비어 있었으면) 우리가 설정한 값만 지운다.
+                try:
+                    winreg.DeleteValue(key, "")
+                except FileNotFoundError:
+                    pass
+    except OSError:
+        pass
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _ASSOC_BACKUP_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.DeleteValue(key, ext)
+    except (FileNotFoundError, OSError):
+        pass
+
+
 def register() -> None:
-    """탐색기 우클릭 메뉴 두 종류(범용 압축 / 아카이브 열기)를 등록한다."""
+    """탐색기 우클릭 메뉴(압축/압축풀기)와 아카이브 확장자 파일 연결을 등록한다."""
     _require_windows()
 
     try:
@@ -92,6 +211,7 @@ def register() -> None:
         # 명령에 "%1.zip" 같은 고정 목적지를 넘길 필요가 없다 - 그냥 선택된 경로들(%*)만 넘긴다.
         _create_menu_key(
             r"Software\Classes\*",
+            _COMPRESS_VERB,
             f"{packnine_cmd} smart-compress %*",
             "PackNine으로 압축하기",
             multi_select=True,
@@ -100,10 +220,19 @@ def register() -> None:
         for ext in _ARCHIVE_EXTENSIONS:
             _create_menu_key(
                 rf"Software\Classes\{ext}",
+                _EXTRACT_VERB,
                 f"{packnine_cmd} smart-extract %*",
-                "PackNine으로 열기",
+                "PackNine으로 압축풀기",
                 multi_select=True,
             )
+
+        # 파일 연결: 더블클릭하면 GUI로 열어 내용을 보여준다(압축풀기와는 별개의 동작).
+        _register_prog_id(
+            open_command=f'{packnine_cmd} open "%1"',
+            icon_reference=_resolve_icon_reference(),
+        )
+        for ext in _ARCHIVE_EXTENSIONS:
+            _backup_and_set_default(ext)
     except OSError as exc:
         raise RuntimeError(
             "레지스트리 등록에 실패했습니다. 권한 문제이거나 동일한 키를 다른 프로그램이 "
@@ -112,12 +241,14 @@ def register() -> None:
 
 
 def unregister() -> None:
-    """register()로 등록한 키를 모두 제거한다."""
+    """register()로 등록한 모든 것(메뉴, ProgID, 파일 연결)을 원상 복구한다."""
     _require_windows()
 
     try:
-        _delete_menu_key(r"Software\Classes\*")
+        _delete_menu_key(r"Software\Classes\*", _COMPRESS_VERB)
         for ext in _ARCHIVE_EXTENSIONS:
-            _delete_menu_key(rf"Software\Classes\{ext}")
+            _delete_menu_key(rf"Software\Classes\{ext}", _EXTRACT_VERB)
+            _restore_default(ext)
+        _unregister_prog_id()
     except OSError as exc:
         raise RuntimeError(f"레지스트리 해제(삭제)에 실패했습니다. (원인: {exc})") from exc

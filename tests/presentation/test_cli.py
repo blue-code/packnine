@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pathlib
 
-from packnine.presentation.cli import main
+from packnine.presentation.cli import _has_console, main
 
 
 def _make_source_tree(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -123,6 +123,60 @@ def test_smart_extract_continues_after_one_failure(tmp_path, capsys, monkeypatch
     output = capsys.readouterr().out
     assert f"실패: {missing_archive}" in output
     assert f"성공: {good_archive}" in output
+
+
+def test_has_console_false_when_stdout_is_none(monkeypatch):
+    # PyInstaller windowed(console=False) 빌드가 탐색기에서 콘솔 없이 실행되면
+    # sys.stdout 자체가 None이 된다 - 이전에는 .isatty() 호출이 AttributeError로
+    # 죽어서 우클릭 메뉴가 "아무 반응 없는" 것처럼 보이는 버그가 있었다.
+    monkeypatch.setattr("sys.stdout", None)
+    assert _has_console() is False
+
+
+def test_has_console_true_for_real_tty(monkeypatch):
+    class _FakeTTYStdout:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr("sys.stdout", _FakeTTYStdout())
+    assert _has_console() is True
+
+
+def test_smart_compress_works_without_console(tmp_path, monkeypatch):
+    # sys.stdout이 None인(콘솔 없는 windowed 실행) 상황을 그대로 재현해,
+    # 회귀가 다시 생기면 여기서 AttributeError로 바로 드러나게 한다.
+    monkeypatch.setattr("sys.stdout", None)
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    report = src_dir / "report.docx"
+    report.write_text("dummy content", encoding="utf-8")
+
+    calls = []
+    monkeypatch.setattr(
+        "packnine.presentation.gui.quick_progress.run_with_progress",
+        lambda title, operation: (calls.append(title), operation(None), True)[-1],
+    )
+
+    exit_code = main(["smart-compress", str(report)])
+
+    assert exit_code == 0
+    assert (src_dir / "report.zip").exists()
+    assert calls == ["압축 중..."]
+
+
+def test_open_command_launches_gui_with_archive(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "packnine.presentation.gui.main_window.run_gui",
+        lambda initial_archive=None: calls.append(initial_archive) or 0,
+    )
+
+    archive_path = tmp_path / "out.zip"
+    exit_code = main(["open", str(archive_path)])
+
+    assert exit_code == 0
+    assert calls == [archive_path]
 
 
 def test_register_context_menu_calls_service(monkeypatch, capsys):

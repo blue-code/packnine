@@ -329,13 +329,19 @@ class MainWindow(QMainWindow):
             self._run_compress(source_paths, destination, password, compression_level)
 
 
-def run_gui() -> int:
-    """GUI 애플리케이션을 실행한다. 이미 QApplication 인스턴스가 있으면 재사용한다."""
+def run_gui(initial_archive: pathlib.Path | None = None) -> int:
+    """GUI 애플리케이션을 실행한다. 이미 QApplication 인스턴스가 있으면 재사용한다.
+
+    initial_archive가 주어지면(파일 연결로 더블클릭 실행된 경우) 창을 띄우자마자
+    그 아카이브를 바로 연다.
+    """
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
     if _ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(_ICON_PATH)))
     window = MainWindow()
+    if initial_archive is not None:
+        window._open_archive(initial_archive)
     window.show()
     return app.exec()

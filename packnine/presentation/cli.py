@@ -80,11 +80,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     context_menu_parser = subparsers.add_parser(
-        "register-context-menu", help="탐색기 우클릭 메뉴를 등록/해제한다(설치 프로그램이 호출)"
+        "register-context-menu", help="탐색기 우클릭 메뉴/파일 연결을 등록·해제한다(설치 프로그램이 호출)"
     )
     context_menu_parser.add_argument(
-        "--unregister", action="store_true", help="등록된 메뉴를 제거한다"
+        "--unregister", action="store_true", help="등록된 메뉴/파일 연결을 제거한다"
     )
+
+    # 파일 연결(더블클릭) 시 탐색기가 실행하는 명령. GUI를 띄우고 그 아카이브를 바로 연다.
+    open_parser = subparsers.add_parser(
+        "open", help="아카이브를 GUI로 열어 내용을 보여준다(더블클릭 파일 연결용)"
+    )
+    open_parser.add_argument("archive", help="열 아카이브 경로")
 
     return parser
 
@@ -140,6 +146,20 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _has_console() -> bool:
+    """터미널에 연결되어 있는지 안전하게 확인한다.
+
+    PyInstaller로 windowed(console=False) 빌드된 exe를 탐색기 우클릭 메뉴처럼
+    부모 콘솔 없이 실행하면 sys.stdout 자체가 None이 되어 .isatty() 호출이
+    AttributeError를 던진다 - 콘솔이 없는데도 예외가 잡히지 않고 조용히 죽어
+    "아무 반응이 없는" 것처럼 보이는 버그였다. 여기서 모든 예외를 콘솔 없음으로 취급한다.
+    """
+    try:
+        return bool(sys.stdout) and sys.stdout.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def _cmd_smart_compress(args: argparse.Namespace) -> int:
     service = CompressService()
     sources = [pathlib.Path(p) for p in args.sources]
@@ -175,7 +195,7 @@ def _cmd_smart_compress(args: argparse.Namespace) -> int:
 
     # 콘솔이 연결되어 있으면(터미널에서 직접 실행) 텍스트로만 결과를 알리고,
     # 콘솔이 없으면(탐색기 우클릭 -> windowed exe) 작은 진행률 창 + 에러 다이얼로그로 대신한다.
-    if sys.stdout.isatty():
+    if _has_console():
         manifest = operation(None)
         print(f"압축 완료: {len(manifest.entries)}개 항목, 출력 경로: {destination}")
         return 0
@@ -189,7 +209,7 @@ def _cmd_smart_compress(args: argparse.Namespace) -> int:
 def _cmd_smart_extract(args: argparse.Namespace) -> int:
     service = ExtractService()
     dest_dir = pathlib.Path(args.dest_dir) if args.dest_dir else None
-    use_gui_progress = not sys.stdout.isatty()
+    use_gui_progress = not _has_console()
 
     if use_gui_progress:
         from packnine.presentation.gui import quick_progress
@@ -251,6 +271,14 @@ def main(argv: list[str] | None = None) -> int:
         from packnine.presentation.gui.main_window import run_gui
 
         return run_gui()
+
+    if args.command == "open":
+        # 파일 연결(더블클릭)로 실행되는 경로 - GUI를 띄우고 그 아카이브를 바로 연다.
+        # 아카이브 관련 예외는 MainWindow가 자체적으로 메시지 박스로 처리하므로
+        # 여기서 별도로 try/except할 필요가 없다.
+        from packnine.presentation.gui.main_window import run_gui
+
+        return run_gui(initial_archive=pathlib.Path(args.archive))
 
     try:
         if args.command == "compress":
