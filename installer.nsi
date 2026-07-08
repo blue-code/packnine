@@ -48,7 +48,7 @@ Section "PackNine 프로그램 (필수)" SecCore
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PackNine" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PackNine" "DisplayIcon" "$INSTDIR\PackNine.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PackNine" "Publisher" "PackNine Contributors"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PackNine" "DisplayVersion" "0.2.0"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PackNine" "DisplayVersion" "0.2.1"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PackNine" "InstallLocation" "$INSTDIR"
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PackNine" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PackNine" "NoRepair" 1
