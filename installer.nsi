@@ -1,4 +1,4 @@
-; PackNine Windows 설치 프로그램(NSIS 스크립트)
+﻿; PackNine Windows 설치 프로그램(NSIS 스크립트)
 ; 관리자 권한 없이(RequestExecutionLevel user) 사용자 프로필 아래에 설치한다.
 ; 컴파일: "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
 
