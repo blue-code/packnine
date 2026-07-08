@@ -44,10 +44,21 @@ class ArchiveSecurityPolicy:
         if entry.is_symlink and not self.allow_symlinks:
             raise UnsafeArchiveEntryError(name, "심볼릭 링크 엔트리는 허용되지 않습니다")
 
-        root = destination_root.resolve()
-        candidate = (root / name).resolve()
+        # ZIP 스펙은 '/'를 구분자로 쓰지만, 악성 엔트리가 Windows 스타일 '\'를 섞어
+        # 넣으면 POSIX에서 pathlib가 이를 하나의 파일명으로 오인해 뒤의 resolve()
+        # 기반 검사를 무력화할 수 있다(플랫폼에 따라 방어 여부가 갈리는 취약점).
+        # 그래서 먼저 '\'를 '/'로 정규화한 뒤 세그먼트 단위로 ".."을 직접 검사한다.
+        normalized = name.replace("\\", "/")
+        segments = [seg for seg in normalized.split("/") if seg not in ("", ".")]
+        if any(seg == ".." for seg in segments):
+            raise UnsafeArchiveEntryError(
+                name, "대상 디렉터리를 벗어나는 경로(Zip Slip)가 감지되었습니다"
+            )
 
-        # Zip Slip 방지: 정규화 후에도 candidate가 root 하위(또는 root 자신)여야 한다.
+        root = destination_root.resolve()
+        candidate = (root / normalized).resolve()
+
+        # Zip Slip 방지(2차 방어): 정규화 후에도 candidate가 root 하위(또는 root 자신)여야 한다.
         if candidate != root and root not in candidate.parents:
             raise UnsafeArchiveEntryError(
                 name, "대상 디렉터리를 벗어나는 경로(Zip Slip)가 감지되었습니다"
