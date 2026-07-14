@@ -1,10 +1,16 @@
-"""PackNine 메인 윈도우.
+"""PackNine 메인 윈도우 - 탐색기형(아카이버 표준) 레이아웃.
 
-application 계층의 CompressService/ExtractService/InspectService만 호출하며
-infrastructure 어댑터는 직접 참조하지 않는다(계층 경계 유지).
+반디집/7-Zip류 압축 프로그램의 일반적인 작업 흐름(툴바 + 좌측 폴더 트리 +
+우측 현재 폴더 파일 목록 + 상태 표시줄)을 따른다. 레이아웃/동작 패턴은 아카이버
+표준 UX를 구현한 것이며, 특정 제품의 아이콘·로고·시각 디자인은 복제하지 않는다
+(아이콘은 Qt 표준 아이콘 사용 - README의 비복제 원칙 유지).
+
+application 계층의 서비스만 호출하며 infrastructure 어댑터는 직접 참조하지 않는다
+(계층 경계 유지).
 """
 from __future__ import annotations
 
+import datetime
 import pathlib
 import shutil
 import sys
@@ -20,15 +26,21 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressDialog,
+    QSplitter,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
 from packnine.application.compress_service import CompressService
 from packnine.application.extract_service import ExtractService
 from packnine.application.inspect_service import InspectService
 from packnine.application.update_service import UpdateService
-from packnine.domain.entities import ArchiveManifest
+from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryError
 from packnine.presentation.gui.image_viewer import ImageViewerDialog, is_image_name
 
@@ -53,7 +65,12 @@ _ARCHIVE_EXTENSIONS = (
     ".xz",
 )
 
-_TABLE_HEADERS = ["이름", "크기", "압축크기", "압축률"]
+_TABLE_HEADERS = ["이름", "크기", "압축크기", "압축률", "수정한 날짜"]
+
+# 테이블 아이템에 붙이는 커스텀 데이터 롤.
+# _ROLE_PATH: 아카이브 내부 전체 경로("pics/photo.png"), _ROLE_KIND: "file"/"folder"/"up"
+_ROLE_PATH = Qt.ItemDataRole.UserRole
+_ROLE_KIND = Qt.ItemDataRole.UserRole + 1
 
 # PyInstaller로 빌드하면 리소스가 sys._MEIPASS 아래에 풀리므로, 개발 환경(소스 실행)과
 # 빌드 환경 양쪽에서 아이콘을 찾을 수 있도록 두 경로를 모두 시도한다.
@@ -67,13 +84,70 @@ def _is_archive_path(path: pathlib.Path) -> bool:
     return any(name.endswith(ext) for ext in _ARCHIVE_EXTENSIONS)
 
 
+def _format_timestamp(timestamp: float | None) -> str:
+    if timestamp is None:
+        return ""
+    try:
+        return datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+class _GroupedItem(QTableWidgetItem):
+    """'..' → 폴더 → 파일 순 그룹을 유지하면서 그룹 안에서만 값으로 정렬되는 아이템.
+
+    일반 QTableWidgetItem으로 정렬하면 크기 기준 정렬 시 폴더 행이 파일들
+    사이에 흩어진다. 탐색기/반디집처럼 그룹 우선 정렬을 위해 비교 연산을 재정의한다.
+    """
+
+    def __init__(self, group: int, sort_value, text: str = "") -> None:
+        super().__init__(text)
+        self._group = group
+        self._sort_value = sort_value
+
+    def __lt__(self, other) -> bool:  # noqa: D105
+        if isinstance(other, _GroupedItem):
+            if self._group != other._group:
+                return self._group < other._group
+            try:
+                return self._sort_value < other._sort_value
+            except TypeError:
+                return str(self._sort_value) < str(other._sort_value)
+        return super().__lt__(other)
+
+
+def _direct_children(
+    entries: list[ArchiveEntry], folder: str
+) -> tuple[list[str], list[ArchiveEntry]]:
+    """현재 폴더 바로 아래의 (하위 폴더 이름들, 파일 엔트리들)을 계산한다.
+
+    아카이브에는 디렉터리 엔트리가 없을 수도 있으므로(zip은 생략 가능),
+    파일 경로에서 중간 폴더를 유도해야 목록에서 폴더가 누락되지 않는다.
+    """
+    prefix = f"{folder}/" if folder else ""
+    subfolders: set[str] = set()
+    files: list[ArchiveEntry] = []
+    for entry in entries:
+        name = entry.name.rstrip("/")
+        if not name.startswith(prefix) or name == folder:
+            continue
+        rest = name[len(prefix):]
+        if "/" in rest:
+            subfolders.add(rest.split("/", 1)[0])
+        elif entry.is_dir:
+            subfolders.add(rest)
+        else:
+            files.append(entry)
+    return sorted(subfolders), files
+
+
 class MainWindow(QMainWindow):
-    """아카이브 열기/압축/해제/테스트를 수행하는 메인 윈도우."""
+    """아카이브 열기/압축/해제/편집을 수행하는 메인 윈도우(탐색기형)."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PackNine")
-        self.resize(800, 500)
+        self.resize(960, 600)
         self.setAcceptDrops(True)
         if _ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(_ICON_PATH)))
@@ -83,51 +157,144 @@ class MainWindow(QMainWindow):
         self._inspect_service = InspectService()
         self._update_service = UpdateService()
 
-        # 현재 열려있는 아카이브 경로 - "압축풀기"/"테스트" 액션이 대상으로 사용한다.
+        # 현재 열려있는 아카이브 경로 - "압축 풀기"/"테스트" 액션이 대상으로 사용한다.
         self._current_archive_path: pathlib.Path | None = None
+        # 더블클릭한 행이 어떤 엔트리인지 알아야 이미지 뷰어/열기를 수행할 수 있어 보관한다.
+        self._current_manifest: ArchiveManifest | None = None
+        # 탐색기형 뷰의 현재 폴더(""=루트). 테이블은 이 폴더의 직속 항목만 보여준다.
+        self._current_folder: str = ""
         # 현재 아카이브에서 검증된 비밀번호. 열기/해제 어느 시점에 입력받았든 이후
         # 동작(테스트, 미리보기)에서 재입력 없이 재사용한다.
         self._current_password: str | None = None
         # 더블클릭 "기본 프로그램으로 열기"용 임시 폴더들. 외부 프로그램이 파일을 읽는
-        # 동안에는 지울 수 없으므로 모아두었다가 창을 닫을 때 일괄 정리한다(반디집과 동일).
+        # 동안에는 지울 수 없으므로 모아두었다가 창을 닫을 때 일괄 정리한다.
         self._open_temp_dirs: list[pathlib.Path] = []
-        # 더블클릭한 행이 어떤 엔트리인지 알아야 이미지 뷰어를 열 수 있어 목록도 보관한다.
-        self._current_manifest: ArchiveManifest | None = None
 
+        self._build_central()
+        self._build_toolbar()
+        self._build_menus()
+        self.statusBar().showMessage("아카이브를 열거나 파일을 끌어다 놓으세요")
+
+    # ------------------------------------------------------------------
+    # UI 구성
+    # ------------------------------------------------------------------
+    def _build_central(self) -> None:
+        # 주소 표시줄: "아카이브명\현재\폴더" - 탐색기처럼 현재 위치를 보여준다.
+        self._address_bar = QLineEdit()
+        self._address_bar.setReadOnly(True)
+        self._address_bar.setPlaceholderText("열린 아카이브 없음")
+
+        # 좌측: 아카이브 내부 폴더 트리
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._tree.itemClicked.connect(self._on_tree_item_clicked)
+
+        # 우측: 현재 폴더의 파일 목록
         self._table = QTableWidget(0, len(_TABLE_HEADERS))
         self._table.setHorizontalHeaderLabels(_TABLE_HEADERS)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.cellDoubleClicked.connect(self._on_table_double_clicked)
-        self.setCentralWidget(self._table)
+        self._table.itemSelectionChanged.connect(self._update_status_bar)
+        self._table.setColumnWidth(0, 320)
 
-        self._build_toolbar()
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._tree)
+        splitter.addWidget(self._table)
+        # 반디집처럼 좌측 트리는 좁게, 우측 목록을 넓게 시작한다.
+        splitter.setSizes([220, 740])
+        splitter.setStretchFactor(1, 1)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        layout.addWidget(self._address_bar)
+        layout.addWidget(splitter)
+        self.setCentralWidget(container)
+
+    def _std_icon(self, pixmap: QStyle.StandardPixmap) -> QIcon:
+        return self.style().standardIcon(pixmap)
 
     def _build_toolbar(self) -> None:
         toolbar = self.addToolBar("메인")
+        toolbar.setMovable(False)
+        # 반디집처럼 아이콘 아래 텍스트가 있는 큰 버튼 스타일.
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
 
-        self.action_open = QAction("열기", self)
+        self.action_open = QAction(self._std_icon(QStyle.StandardPixmap.SP_DirOpenIcon), "열기", self)
         self.action_open.triggered.connect(self._on_open)
         toolbar.addAction(self.action_open)
 
-        self.action_compress = QAction("압축하기", self)
+        self.action_compress = QAction(
+            self._std_icon(QStyle.StandardPixmap.SP_FileIcon), "새로 압축", self
+        )
         self.action_compress.triggered.connect(self._on_compress)
         toolbar.addAction(self.action_compress)
 
-        self.action_extract = QAction("압축풀기", self)
+        self.action_extract = QAction(
+            self._std_icon(QStyle.StandardPixmap.SP_DialogSaveButton), "압축 풀기", self
+        )
         self.action_extract.triggered.connect(self._on_extract)
         toolbar.addAction(self.action_extract)
 
-        self.action_test = QAction("테스트", self)
-        self.action_test.triggered.connect(self._on_test)
-        toolbar.addAction(self.action_test)
+        toolbar.addSeparator()
 
-        self.action_add_files = QAction("파일 추가", self)
+        self.action_add_files = QAction(
+            self._std_icon(QStyle.StandardPixmap.SP_FileDialogNewFolder), "파일 추가", self
+        )
         self.action_add_files.triggered.connect(self._on_add_files)
         toolbar.addAction(self.action_add_files)
 
-        self.action_remove_selected = QAction("삭제", self)
+        self.action_remove_selected = QAction(
+            self._std_icon(QStyle.StandardPixmap.SP_TrashIcon), "파일 삭제", self
+        )
         self.action_remove_selected.triggered.connect(self._on_remove_selected)
         toolbar.addAction(self.action_remove_selected)
+
+        toolbar.addSeparator()
+
+        self.action_test = QAction(
+            self._std_icon(QStyle.StandardPixmap.SP_DialogApplyButton), "테스트", self
+        )
+        self.action_test.triggered.connect(self._on_test)
+        toolbar.addAction(self.action_test)
+
+        self.action_up = QAction(self._std_icon(QStyle.StandardPixmap.SP_ArrowUp), "상위 폴더", self)
+        self.action_up.triggered.connect(self._on_navigate_up)
+        toolbar.addAction(self.action_up)
+
+    def _build_menus(self) -> None:
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("파일(&F)")
+        file_menu.addAction(self.action_open)
+        file_menu.addAction(self.action_compress)
+        file_menu.addSeparator()
+        action_quit = QAction("끝내기(&X)", self)
+        action_quit.triggered.connect(self.close)
+        file_menu.addAction(action_quit)
+
+        edit_menu = menu_bar.addMenu("편집(&E)")
+        edit_menu.addAction(self.action_add_files)
+        edit_menu.addAction(self.action_remove_selected)
+
+        tool_menu = menu_bar.addMenu("도구(&T)")
+        tool_menu.addAction(self.action_extract)
+        tool_menu.addAction(self.action_test)
+
+        help_menu = menu_bar.addMenu("도움말(&H)")
+        action_about = QAction("PackNine 정보(&A)", self)
+        action_about.triggered.connect(
+            lambda: QMessageBox.about(
+                self,
+                "PackNine 정보",
+                "PackNine - 오픈소스 Windows 압축 프로그램\n"
+                "ZIP / 7Z / TAR 계열 압축·해제, RAR 해제 지원\n\n"
+                "MIT License",
+            )
+        )
+        help_menu.addAction(action_about)
 
     # ------------------------------------------------------------------
     # 툴바 액션 핸들러
@@ -139,8 +306,7 @@ class MainWindow(QMainWindow):
         self._open_archive(pathlib.Path(path_str))
 
     def _on_compress(self) -> None:
-        # 지연 import: compress_dialog는 main_window와 상호 참조하지 않지만,
-        # 다이얼로그 생성 비용을 실제로 필요할 때만 지불하기 위해 여기서 import한다.
+        # 지연 import: 다이얼로그 생성 비용을 실제로 필요할 때만 지불하기 위함.
         from packnine.presentation.gui.compress_dialog import CompressDialog
 
         dialog = CompressDialog(parent=self)
@@ -207,7 +373,7 @@ class MainWindow(QMainWindow):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _on_add_files(self) -> None:
-        """열려 있는 아카이브에 파일을 추가한다(반디집 '파일 추가')."""
+        """열려 있는 아카이브에 파일을 추가한다."""
         if self._current_archive_path is None:
             QMessageBox.information(self, "안내", "먼저 아카이브를 열어주세요.")
             return
@@ -242,15 +408,14 @@ class MainWindow(QMainWindow):
             progress.close()
 
     def _on_remove_selected(self) -> None:
-        """선택한 엔트리를 아카이브에서 삭제한다(반디집 '파일 삭제')."""
+        """선택한 엔트리를 아카이브에서 삭제한다."""
         if self._current_archive_path is None or self._current_manifest is None:
             QMessageBox.information(self, "안내", "먼저 아카이브를 열어주세요.")
             return
-        selected_rows = sorted({index.row() for index in self._table.selectedIndexes()})
-        if not selected_rows:
+        entry_names = self._selected_entry_paths()
+        if not entry_names:
             QMessageBox.information(self, "안내", "삭제할 항목을 먼저 선택해주세요.")
             return
-        entry_names = [self._table.item(row, 0).text() for row in selected_rows]
 
         answer = QMessageBox.question(
             self,
@@ -285,9 +450,27 @@ class MainWindow(QMainWindow):
         finally:
             progress.close()
 
+    def _on_navigate_up(self) -> None:
+        if not self._current_folder:
+            return
+        parent = self._current_folder.rsplit("/", 1)[0] if "/" in self._current_folder else ""
+        self._navigate_to(parent)
+
     # ------------------------------------------------------------------
     # 내부 헬퍼
     # ------------------------------------------------------------------
+    def _selected_entry_paths(self) -> list[str]:
+        """선택된 행들의 아카이브 내부 전체 경로 목록을 반환한다('..' 행은 제외)."""
+        paths: list[str] = []
+        for row in sorted({index.row() for index in self._table.selectedIndexes()}):
+            item = self._table.item(row, 0)
+            if item is None or item.data(_ROLE_KIND) == "up":
+                continue
+            path = item.data(_ROLE_PATH)
+            if path:
+                paths.append(path)
+        return paths
+
     def _run_compress(
         self,
         source_paths: list[pathlib.Path],
@@ -310,6 +493,7 @@ class MainWindow(QMainWindow):
             self._show_error(exc)
         else:
             self._current_archive_path = destination
+            self._current_password = password
             self._populate_table(manifest)
             QMessageBox.information(self, "완료", f"압축이 완료되었습니다: {destination}")
         finally:
@@ -336,6 +520,7 @@ class MainWindow(QMainWindow):
             if not completed or manifest is None:
                 return
             self._current_archive_path = archive_path
+            self.setWindowTitle(f"{archive_path.name} - PackNine")
             self._populate_table(manifest)
 
     def _prompt_password(self) -> str | None:
@@ -369,43 +554,154 @@ class MainWindow(QMainWindow):
                 self._current_password = password
                 return True
 
+    # ------------------------------------------------------------------
+    # 탐색기형 뷰 갱신
+    # ------------------------------------------------------------------
     def _populate_table(self, manifest: ArchiveManifest) -> None:
+        """새 manifest를 받아 루트 폴더 기준으로 트리/목록/주소를 전부 갱신한다."""
         self._current_manifest = manifest
+        self._current_folder = ""
+        self._rebuild_tree()
+        self._refresh_file_list()
+
+    def _navigate_to(self, folder: str) -> None:
+        self._current_folder = folder
+        self._refresh_file_list()
+
+    def _rebuild_tree(self) -> None:
+        self._tree.clear()
+        if self._current_manifest is None or self._current_archive_path is None:
+            return
+
+        root = QTreeWidgetItem([self._current_archive_path.name])
+        root.setIcon(0, self._std_icon(QStyle.StandardPixmap.SP_DriveHDIcon))
+        root.setData(0, _ROLE_PATH, "")
+        self._tree.addTopLevelItem(root)
+
+        # 파일 경로에서 모든 중간 폴더를 유도한다(zip은 디렉터리 엔트리를 생략할 수 있음).
+        folders: set[str] = set()
+        for entry in self._current_manifest.entries:
+            parts = entry.name.rstrip("/").split("/")
+            prefix_parts = parts[:-1] if not entry.is_dir else parts
+            for depth in range(1, len(prefix_parts) + 1):
+                folders.add("/".join(parts[:depth]))
+
+        nodes: dict[str, QTreeWidgetItem] = {"": root}
+        for folder in sorted(folders):
+            parent_path = folder.rsplit("/", 1)[0] if "/" in folder else ""
+            parent_item = nodes.get(parent_path, root)
+            item = QTreeWidgetItem([folder.rsplit("/", 1)[-1]])
+            item.setIcon(0, self._std_icon(QStyle.StandardPixmap.SP_DirIcon))
+            item.setData(0, _ROLE_PATH, folder)
+            parent_item.addChild(item)
+            nodes[folder] = item
+        root.setExpanded(True)
+
+    def _on_tree_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        folder = item.data(0, _ROLE_PATH)
+        if folder is not None:
+            self._navigate_to(folder)
+
+    def _refresh_file_list(self) -> None:
+        if self._current_manifest is None:
+            self._table.setRowCount(0)
+            self._address_bar.clear()
+            return
+
+        subfolders, files = _direct_children(self._current_manifest.entries, self._current_folder)
+
         # 채우는 동안 정렬이 켜져 있으면 행이 삽입 즉시 재배열되어 데이터가 섞이므로
         # 반드시 끄고 채운 뒤 다시 켠다(Qt 표준 패턴).
         self._table.setSortingEnabled(False)
-        self._table.setRowCount(len(manifest.entries))
-        for row, entry in enumerate(manifest.entries):
-            self._table.setItem(row, 0, QTableWidgetItem(entry.name))
-            # 크기 칼럼은 DisplayRole에 숫자를 넣어야 "9 < 10" 같은 숫자 정렬이 된다
-            # (문자열이면 "10" < "9"로 정렬되는 문제).
-            size_item = QTableWidgetItem()
-            size_item.setData(Qt.ItemDataRole.DisplayRole, entry.size)
-            self._table.setItem(row, 1, size_item)
-            compressed_item = QTableWidgetItem()
-            compressed_item.setData(Qt.ItemDataRole.DisplayRole, entry.compressed_size)
-            self._table.setItem(row, 2, compressed_item)
-            ratio_item = QTableWidgetItem()
-            ratio_item.setData(Qt.ItemDataRole.DisplayRole, round(entry.compression_ratio, 2))
-            self._table.setItem(row, 3, ratio_item)
+        rows: list[tuple[str, str, ArchiveEntry | None]] = []
+        if self._current_folder:
+            rows.append(("..", "up", None))
+        for folder_name in subfolders:
+            rows.append((folder_name, "folder", None))
+        for entry in files:
+            rows.append((entry.name.rsplit("/", 1)[-1], "file", entry))
+
+        # 그룹 우선순위: '..'(0) → 폴더(1) → 파일(2). 어떤 칼럼으로 정렬해도 유지된다.
+        _GROUP = {"up": 0, "folder": 1, "file": 2}
+
+        prefix = f"{self._current_folder}/" if self._current_folder else ""
+        self._table.setRowCount(len(rows))
+        for row, (display_name, kind, entry) in enumerate(rows):
+            group = _GROUP[kind]
+            name_item = _GroupedItem(group, display_name.lower(), display_name)
+            name_item.setData(_ROLE_KIND, kind)
+            if kind == "up":
+                parent = (
+                    self._current_folder.rsplit("/", 1)[0] if "/" in self._current_folder else ""
+                )
+                name_item.setData(_ROLE_PATH, parent)
+                name_item.setIcon(self._std_icon(QStyle.StandardPixmap.SP_FileDialogToParent))
+            elif kind == "folder":
+                name_item.setData(_ROLE_PATH, f"{prefix}{display_name}")
+                name_item.setIcon(self._std_icon(QStyle.StandardPixmap.SP_DirIcon))
+            else:
+                assert entry is not None
+                name_item.setData(_ROLE_PATH, entry.name)
+                name_item.setIcon(self._std_icon(QStyle.StandardPixmap.SP_FileIcon))
+            self._table.setItem(row, 0, name_item)
+
+            if kind == "file" and entry is not None:
+                # 크기 칼럼은 DisplayRole에 숫자를 넣어야 "9 < 10" 같은 숫자 정렬이 된다.
+                size_item = _GroupedItem(group, entry.size)
+                size_item.setData(Qt.ItemDataRole.DisplayRole, entry.size)
+                self._table.setItem(row, 1, size_item)
+                compressed_item = _GroupedItem(group, entry.compressed_size)
+                compressed_item.setData(Qt.ItemDataRole.DisplayRole, entry.compressed_size)
+                self._table.setItem(row, 2, compressed_item)
+                ratio = round(entry.compression_ratio, 2)
+                ratio_item = _GroupedItem(group, ratio)
+                ratio_item.setData(Qt.ItemDataRole.DisplayRole, ratio)
+                self._table.setItem(row, 3, ratio_item)
+                self._table.setItem(
+                    row,
+                    4,
+                    _GroupedItem(group, entry.modified_at or 0.0, _format_timestamp(entry.modified_at)),
+                )
+            else:
+                for column in range(1, len(_TABLE_HEADERS)):
+                    self._table.setItem(row, column, _GroupedItem(group, -1, ""))
         self._table.setSortingEnabled(True)
+        # 탐색 진입 시 기본 정렬: 이름 오름차순(그룹 우선은 _GroupedItem이 보장).
+        self._table.sortItems(0, Qt.SortOrder.AscendingOrder)
+
+        archive_name = self._current_archive_path.name if self._current_archive_path else ""
+        folder_display = self._current_folder.replace("/", "\\")
+        self._address_bar.setText(
+            f"{archive_name}\\{folder_display}" if folder_display else archive_name
+        )
+        self._update_status_bar()
+
+    def _update_status_bar(self) -> None:
+        if self._current_manifest is None:
+            return
+        total = len([e for e in self._current_manifest.entries if not e.is_dir])
+        selected = len(self._selected_entry_paths())
+        message = f"전체 {total}개 파일"
+        if selected:
+            message += f", {selected}개 선택"
+        self.statusBar().showMessage(message)
 
     # ------------------------------------------------------------------
-    # 내장 이미지 뷰어
+    # 더블클릭: 폴더 탐색 / 내장 이미지 뷰어 / 기본 프로그램으로 열기
     # ------------------------------------------------------------------
     def _on_table_double_clicked(self, row: int, _column: int) -> None:
         if self._current_manifest is None or self._current_archive_path is None:
             return
-        if row < 0 or row >= len(self._current_manifest.entries):
-            return
-        # 정렬이 켜져 있으면 테이블 행 순서와 manifest 순서가 다르므로,
-        # 행 인덱스가 아니라 이름 셀로 실제 엔트리를 찾아야 한다.
         name_item = self._table.item(row, 0)
         if name_item is None:
             return
-        entry = next(
-            (e for e in self._current_manifest.entries if e.name == name_item.text()), None
-        )
+        kind = name_item.data(_ROLE_KIND)
+        path = name_item.data(_ROLE_PATH)
+        if kind in ("up", "folder"):
+            self._navigate_to(path or "")
+            return
+
+        entry = next((e for e in self._current_manifest.entries if e.name == path), None)
         if entry is None or entry.is_dir:
             return
         if is_image_name(entry.name):

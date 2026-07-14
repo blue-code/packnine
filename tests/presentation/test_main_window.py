@@ -13,11 +13,56 @@ def test_main_window_creates_with_toolbar_actions(qtbot):
     qtbot.addWidget(window)
 
     assert window.windowTitle() == "PackNine"
-    assert window.action_compress is not None
-    assert window.action_compress.text() == "압축하기"
     assert window.action_open.text() == "열기"
-    assert window.action_extract.text() == "압축풀기"
+    assert window.action_compress.text() == "새로 압축"
+    assert window.action_extract.text() == "압축 풀기"
+    assert window.action_add_files.text() == "파일 추가"
+    assert window.action_remove_selected.text() == "파일 삭제"
     assert window.action_test.text() == "테스트"
+    # 탐색기형 레이아웃 구성 요소: 메뉴바, 폴더 트리, 주소 표시줄, 상태 표시줄
+    assert window.menuBar().actions(), "메뉴바가 비어 있으면 안 된다"
+    assert window._tree is not None
+    assert window._address_bar is not None
+    assert window.statusBar() is not None
+
+
+def test_folder_navigation_like_explorer(qtbot, tmp_path):
+    # 반디집처럼 루트에는 폴더만 보이고, 폴더 더블클릭으로 들어가고 '..'로 나온다.
+    from packnine.application.compress_service import CompressService
+
+    src_dir = tmp_path / "docs"
+    src_dir.mkdir()
+    (src_dir / "inner.txt").write_text("inner", encoding="utf-8")
+    archive_path = tmp_path / "out.zip"
+    CompressService().compress([src_dir], archive_path)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+
+    # 루트: docs 폴더 행 하나
+    names = {window._table.item(r, 0).text() for r in range(window._table.rowCount())}
+    assert "docs" in names
+    assert "inner.txt" not in names
+
+    docs_row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == "docs"
+    )
+    window._on_table_double_clicked(docs_row, 0)
+
+    # docs 내부: '..'와 inner.txt
+    names = {window._table.item(r, 0).text() for r in range(window._table.rowCount())}
+    assert names == {"..", "inner.txt"}
+    assert "docs" in window._address_bar.text()
+
+    up_row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == ".."
+    )
+    window._on_table_double_clicked(up_row, 0)
+    names = {window._table.item(r, 0).text() for r in range(window._table.rowCount())}
+    assert "docs" in names
 
 
 def test_open_archive_populates_table(qtbot, tmp_path, monkeypatch):
@@ -102,6 +147,14 @@ def test_double_click_image_entry_opens_viewer(qtbot, tmp_path, monkeypatch):
     window = MainWindow()
     qtbot.addWidget(window)
     window._open_archive(archive_path)
+
+    # 탐색기형 뷰: 루트에는 pics 폴더만 보이므로 먼저 폴더로 들어간다.
+    pics_row = next(
+        row
+        for row in range(window._table.rowCount())
+        if window._table.item(row, 0).text() == "pics"
+    )
+    window._on_table_double_clicked(pics_row, 0)
 
     image_row = next(
         row
