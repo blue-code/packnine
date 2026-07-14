@@ -15,6 +15,8 @@ from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QInputDialog,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -26,7 +28,7 @@ from packnine.application.compress_service import CompressService
 from packnine.application.extract_service import ExtractService
 from packnine.application.inspect_service import InspectService
 from packnine.domain.entities import ArchiveManifest
-from packnine.domain.exceptions import UnsafeArchiveEntryError
+from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryError
 from packnine.presentation.gui.image_viewer import ImageViewerDialog, is_image_name
 
 # 이미지 미리보기를 위해 한 번에 임시 폴더로 미리 꺼내둘 이미지 개수 상한.
@@ -78,6 +80,9 @@ class MainWindow(QMainWindow):
 
         # 현재 열려있는 아카이브 경로 - "압축풀기"/"테스트" 액션이 대상으로 사용한다.
         self._current_archive_path: pathlib.Path | None = None
+        # 현재 아카이브에서 검증된 비밀번호. 열기/해제 어느 시점에 입력받았든 이후
+        # 동작(테스트, 미리보기)에서 재입력 없이 재사용한다.
+        self._current_password: str | None = None
         # 더블클릭한 행이 어떤 엔트리인지 알아야 이미지 뷰어를 열 수 있어 목록도 보관한다.
         self._current_manifest: ArchiveManifest | None = None
 
@@ -138,17 +143,21 @@ class MainWindow(QMainWindow):
         destination = pathlib.Path(destination_str)
         progress = self._make_progress_dialog("압축 해제 중...")
         try:
-            self._extract_service.extract(
-                self._current_archive_path,
-                destination,
-                on_progress=self._progress_callback(progress),
+            completed = self._execute_with_password_retry(
+                lambda password: self._extract_service.extract(
+                    self._current_archive_path,
+                    destination,
+                    password=password,
+                    on_progress=self._progress_callback(progress),
+                )
             )
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
         except Exception as exc:  # noqa: BLE001 - 애플리케이션 크래시 방지를 위해 광범위하게 처리
             self._show_error(exc)
         else:
-            QMessageBox.information(self, "완료", f"압축 해제가 완료되었습니다: {destination}")
+            if completed:
+                QMessageBox.information(self, "완료", f"압축 해제가 완료되었습니다: {destination}")
         finally:
             progress.close()
 
@@ -161,17 +170,21 @@ class MainWindow(QMainWindow):
         temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="packnine_test_"))
         progress = self._make_progress_dialog("무결성 테스트 중...")
         try:
-            self._extract_service.extract(
-                self._current_archive_path,
-                temp_dir,
-                on_progress=self._progress_callback(progress),
+            completed = self._execute_with_password_retry(
+                lambda password: self._extract_service.extract(
+                    self._current_archive_path,
+                    temp_dir,
+                    password=password,
+                    on_progress=self._progress_callback(progress),
+                )
             )
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "테스트 실패", f"아카이브 무결성 테스트에 실패했습니다:\n{exc}")
         else:
-            QMessageBox.information(self, "테스트 성공", "아카이브가 정상적으로 해제 가능합니다.")
+            if completed:
+                QMessageBox.information(self, "테스트 성공", "아카이브가 정상적으로 해제 가능합니다.")
         finally:
             progress.close()
             # 실제 위치에 결과물을 남기지 않는다는 요구사항에 따라 임시 폴더는 항상 삭제한다.
@@ -208,15 +221,58 @@ class MainWindow(QMainWindow):
             progress.close()
 
     def _open_archive(self, archive_path: pathlib.Path) -> None:
+        # 다른 아카이브의 비밀번호를 새 아카이브에 재사용하지 않는다.
+        if archive_path != self._current_archive_path:
+            self._current_password = None
         try:
-            manifest = self._inspect_service.list_contents(archive_path)
+            manifest: ArchiveManifest | None = None
+
+            def _list(password: str | None) -> None:
+                nonlocal manifest
+                # 헤더 암호화된 7z 등은 목록 조회 단계에서부터 비밀번호가 필요하다.
+                manifest = self._inspect_service.list_contents(archive_path, password=password)
+
+            completed = self._execute_with_password_retry(_list)
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
         except Exception as exc:  # noqa: BLE001
             self._show_error(exc)
         else:
+            if not completed or manifest is None:
+                return
             self._current_archive_path = archive_path
             self._populate_table(manifest)
+
+    def _prompt_password(self) -> str | None:
+        """비밀번호 입력 다이얼로그를 띄운다. 취소하면 None을 반환한다."""
+        name = self._current_archive_path.name if self._current_archive_path else "아카이브"
+        text, ok = QInputDialog.getText(
+            self,
+            "비밀번호 필요",
+            f"'{name}'의 비밀번호를 입력하세요:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok or not text:
+            return None
+        return text
+
+    def _execute_with_password_retry(self, operation) -> bool:
+        """operation(password)를 실행하되, 비밀번호 오류면 입력받아 재시도한다.
+
+        성공하면 검증된 비밀번호를 보관하고 True, 사용자가 입력을 취소하면 False.
+        비밀번호 외의 예외는 그대로 전파해 호출자의 기존 except 절이 처리하게 한다.
+        """
+        password = self._current_password
+        while True:
+            try:
+                operation(password)
+            except InvalidPasswordError:
+                password = self._prompt_password()
+                if password is None:
+                    return False
+            else:
+                self._current_password = password
+                return True
 
     def _populate_table(self, manifest: ArchiveManifest) -> None:
         self._current_manifest = manifest
@@ -255,9 +311,14 @@ class MainWindow(QMainWindow):
         temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="packnine_preview_"))
         try:
             entry_names = [e.name for e in image_entries]
-            self._extract_service.extract_entries(
-                self._current_archive_path, entry_names, temp_dir
+            completed = self._execute_with_password_retry(
+                lambda password: self._extract_service.extract_entries(
+                    self._current_archive_path, entry_names, temp_dir, password=password
+                )
             )
+            if not completed:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
             shutil.rmtree(temp_dir, ignore_errors=True)

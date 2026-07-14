@@ -13,7 +13,11 @@ import shutil
 import rarfile
 
 from packnine.domain.entities import ArchiveEntry, ArchiveManifest
-from packnine.domain.exceptions import ExternalToolMissingError
+from packnine.domain.exceptions import (
+    CorruptedArchiveError,
+    ExternalToolMissingError,
+    InvalidPasswordError,
+)
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
 
@@ -37,7 +41,12 @@ class RarArchiveReader:
         _ensure_unrar_tool_available()
         self._path = pathlib.Path(path)
         self._password = password
-        self._archive = rarfile.RarFile(self._path)
+        try:
+            self._archive = rarfile.RarFile(self._path)
+        except rarfile.PasswordRequired as exc:
+            raise InvalidPasswordError(f"비밀번호가 필요한 아카이브입니다: {self._path}") from exc
+        except rarfile.Error as exc:  # NotRarFile, BadRarFile 등 파싱 실패 전반
+            raise CorruptedArchiveError(f"RAR 파일이 손상되었거나 rar 형식이 아닙니다: {self._path}") from exc
         if password:
             self._archive.setpassword(password)
 
@@ -84,9 +93,20 @@ class RarArchiveReader:
         destination.mkdir(parents=True, exist_ok=True)
         total = len(validated)
         for done, (entry, _target_path) in enumerate(validated, start=1):
-            self._archive.extract(entry.name, path=destination, pwd=self._password)
+            self._extract_entry(entry.name, destination)
             if on_progress is not None:
                 on_progress(entry.name, done, total)
+
+    def _extract_entry(self, entry_name: str, destination: pathlib.Path) -> None:
+        """단일 엔트리를 해제하되 rarfile의 암호/손상 예외를 도메인 예외로 변환한다."""
+        try:
+            self._archive.extract(entry_name, path=destination, pwd=self._password)
+        except (rarfile.PasswordRequired, rarfile.RarWrongPassword) as exc:
+            raise InvalidPasswordError(
+                f"비밀번호가 틀렸거나 필요합니다: {self._path}"
+            ) from exc
+        except rarfile.BadRarFile as exc:
+            raise CorruptedArchiveError(f"RAR 파일이 손상되었습니다: {self._path}") from exc
 
     def extract_one(self, entry_name: str, destination: pathlib.Path) -> None:
         destination = pathlib.Path(destination)
@@ -99,7 +119,7 @@ class RarArchiveReader:
         policy.validate_entry(entry, destination)
 
         destination.mkdir(parents=True, exist_ok=True)
-        self._archive.extract(entry_name, path=destination, pwd=self._password)
+        self._extract_entry(entry_name, destination)
 
     def close(self) -> None:
         self._archive.close()

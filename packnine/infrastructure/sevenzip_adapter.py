@@ -6,14 +6,39 @@ zipfile의 한계로 쓰기 시 실제 암호화를 지원하지 않음).
 """
 from __future__ import annotations
 
+import contextlib
+import lzma
 import pathlib
 
 import py7zr
+import py7zr.exceptions
 
 from packnine.domain.entities import ArchiveEntry, ArchiveManifest
+from packnine.domain.exceptions import CorruptedArchiveError, InvalidPasswordError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
 from packnine.domain.value_objects import CompressionLevel
+
+
+@contextlib.contextmanager
+def _map_py7zr_errors(path: pathlib.Path, password: str | None):
+    """py7zr의 들쭉날쭉한 예외를 도메인 예외로 변환한다.
+
+    헤더 암호화된 7z를 틀린 암호로 열면 py7zr은 깨진 헤더를 그대로 파싱하다가
+    TypeError("Unknown field...") 같은 내부 예외를 던진다(전용 예외 없음).
+    암호가 주어진 상태의 파싱/CRC 실패는 "암호가 틀렸을 가능성"으로 안내하고,
+    무암호 상태의 동일 실패는 파일 손상으로 안내한다.
+    """
+    try:
+        yield
+    except py7zr.exceptions.PasswordRequired as exc:
+        raise InvalidPasswordError(f"비밀번호가 필요한 아카이브입니다: {path}") from exc
+    except (TypeError, py7zr.exceptions.Bad7zFile, py7zr.exceptions.CrcError, lzma.LZMAError) as exc:
+        if password is not None:
+            raise InvalidPasswordError(
+                f"비밀번호가 틀렸거나 파일이 손상되었습니다: {path}"
+            ) from exc
+        raise CorruptedArchiveError(f"7Z 파일이 손상되었습니다: {path}") from exc
 
 
 class SevenZipArchiveReader:
@@ -22,11 +47,14 @@ class SevenZipArchiveReader:
     def __init__(self, path: pathlib.Path, password: str | None = None) -> None:
         self._path = pathlib.Path(path)
         self._password = password
-        self._archive = py7zr.SevenZipFile(self._path, mode="r", password=password)
+        with _map_py7zr_errors(self._path, password):
+            self._archive = py7zr.SevenZipFile(self._path, mode="r", password=password)
 
     def list_entries(self) -> list[ArchiveEntry]:
         entries: list[ArchiveEntry] = []
-        for info in self._archive.list():
+        with _map_py7zr_errors(self._path, self._password):
+            infos = self._archive.list()
+        for info in infos:
             name = info.filename.replace("\\", "/")
             uncompressed = info.uncompressed or 0
             # 솔리드 블록의 마지막 파일이 아닌 경우 compressed가 None으로 나올 수 있어
@@ -67,7 +95,8 @@ class SevenZipArchiveReader:
         validated = self._validate_all(destination)
 
         destination.mkdir(parents=True, exist_ok=True)
-        self._archive.extractall(path=destination)
+        with _map_py7zr_errors(self._path, self._password):
+            self._archive.extractall(path=destination)
 
         total = len(validated)
         for done, (entry, _target_path) in enumerate(validated, start=1):
@@ -86,7 +115,8 @@ class SevenZipArchiveReader:
         policy.validate_entry(entry, destination)
 
         destination.mkdir(parents=True, exist_ok=True)
-        self._archive.extract(path=destination, targets=[entry_name])
+        with _map_py7zr_errors(self._path, self._password):
+            self._archive.extract(path=destination, targets=[entry_name])
 
     def close(self) -> None:
         self._archive.close()

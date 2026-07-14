@@ -15,7 +15,12 @@ from packnine.application.compress_service import CompressService
 from packnine.application.context_menu_service import ContextMenuService
 from packnine.application.extract_service import ExtractService
 from packnine.application.inspect_service import InspectService
-from packnine.domain.exceptions import ExternalToolMissingError, UnsafeArchiveEntryError
+from packnine.domain.exceptions import (
+    CorruptedArchiveError,
+    ExternalToolMissingError,
+    InvalidPasswordError,
+    UnsafeArchiveEntryError,
+)
 from packnine.domain.value_objects import CompressionLevel
 
 
@@ -227,8 +232,20 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
 
         if use_gui_progress:
             # 여러 아카이브를 순차 처리하되, 하나가 실패해도(에러 다이얼로그만 뜨고)
-            # 나머지는 계속 진행한다.
-            ok = quick_progress.run_with_progress(f"압축 해제 중: {archive_path.name}", operation)
+            # 나머지는 계속 진행한다. 암호 아카이브면 비밀번호 입력을 받아 재시도한다.
+            def operation_with_password(
+                on_progress, password, _archive_path=archive_path, _base=base_destination
+            ):
+                return service.smart_extract(
+                    _archive_path, _base, password=password, on_progress=on_progress
+                )
+
+            ok = quick_progress.run_extract_with_password_retry(
+                f"압축 해제 중: {archive_path.name}",
+                operation_with_password,
+                archive_name=archive_path.name,
+                initial_password=args.password,
+            )
             if not ok:
                 had_failure = True
             continue
@@ -237,6 +254,12 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
             manifest = operation(None)
         except UnsafeArchiveEntryError as exc:
             print(f"실패: {archive_path} - 안전하지 않은 아카이브입니다 ({exc})")
+            had_failure = True
+        except InvalidPasswordError as exc:
+            print(f"실패: {archive_path} - 비밀번호를 확인하세요 ({exc})")
+            had_failure = True
+        except CorruptedArchiveError as exc:
+            print(f"실패: {archive_path} - 손상된 아카이브입니다 ({exc})")
             had_failure = True
         except ExternalToolMissingError as exc:
             print(f"실패: {archive_path} - 필요한 외부 도구가 없습니다 ({exc})")
@@ -298,6 +321,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except UnsafeArchiveEntryError as exc:
         print(f"오류: 안전하지 않은 아카이브입니다 - {exc}", file=sys.stderr)
+        return 1
+    except InvalidPasswordError as exc:
+        print(f"오류: 비밀번호를 확인하세요 - {exc}", file=sys.stderr)
+        return 1
+    except CorruptedArchiveError as exc:
+        print(f"오류: 손상된 아카이브입니다 - {exc}", file=sys.stderr)
         return 1
     except ExternalToolMissingError as exc:
         print(f"오류: 필요한 외부 도구가 없습니다 - {exc}", file=sys.stderr)

@@ -34,6 +34,12 @@ class CompressService:
             if not pathlib.Path(source_path).exists():
                 raise FileNotFoundError(f"압축할 소스 경로가 존재하지 않습니다: {source_path}")
 
+        # 해제(extract)가 대상 폴더를 자동 생성하는 것과 동일하게, 출력 아카이브의
+        # 부모 폴더도 없으면 만들어 준다. 우클릭 메뉴의 --dest-dir처럼 아직 없는
+        # 폴더가 목적지로 들어와도 FileNotFoundError로 죽지 않아야 한다.
+        # (소스 검증보다 뒤에 두어, 잘못된 요청에서는 빈 폴더가 생기지 않게 한다)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
         # RAR 확장자면 get_writer가 UnsupportedFormatError를 던지며,
         # 여기서는 그대로 전파시킨다(RAR 쓰기는 라이선스상 미지원).
         writer = format_registry.get_writer(

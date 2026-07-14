@@ -11,9 +11,19 @@ import tarfile
 
 import pytest
 
-from packnine.domain.exceptions import UnsafeArchiveEntryError
+from packnine.domain.exceptions import CorruptedArchiveError, UnsafeArchiveEntryError
 from packnine.infrastructure.tar_adapter import TarArchiveReader, TarArchiveWriter
 from tests.infrastructure.conftest import assert_tree_equal, make_sample_source_tree
+
+
+class TestTarCorruptedArchive:
+    def test_corrupted_tar_raises_corrupted_archive_error(self, tmp_path: pathlib.Path):
+        # tarfile.ReadError가 그대로 새어 나가면 CLI가 traceback을 뿜는다.
+        broken = tmp_path / "broken.tar.gz"
+        broken.write_bytes(b"\x1f\x8b" + b"\x00" * 32)
+
+        with pytest.raises(CorruptedArchiveError):
+            TarArchiveReader(broken)
 
 
 class TestTarRoundTrip:

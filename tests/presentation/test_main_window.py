@@ -129,6 +129,64 @@ def test_double_click_image_entry_opens_viewer(qtbot, tmp_path, monkeypatch):
     assert not image_paths[0].exists()
 
 
+def _make_encrypted_zip(tmp_path: pathlib.Path, password: str) -> pathlib.Path:
+    from packnine.application.compress_service import CompressService
+
+    src_file = tmp_path / "secret.txt"
+    src_file.write_text("top secret", encoding="utf-8")
+    archive_path = tmp_path / "locked.zip"
+    CompressService().compress([src_file], archive_path, password=password)
+    return archive_path
+
+
+def test_extract_encrypted_archive_prompts_for_password(qtbot, tmp_path, monkeypatch):
+    # 암호 zip은 목록 조회는 되지만(엔트리명은 평문) 해제 시 암호가 필요하다.
+    # GUI에 암호 입력 수단이 없으면 사용자는 암호 아카이브를 영영 풀 수 없다.
+    from PySide6.QtWidgets import QInputDialog
+
+    archive_path = _make_encrypted_zip(tmp_path, password="pw123")
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+    assert window._table.rowCount() == 1
+
+    destination = tmp_path / "out"
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(destination)
+    )
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("pw123", True))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    window._on_extract()
+
+    assert (destination / "secret.txt").read_text(encoding="utf-8") == "top secret"
+
+
+def test_extract_encrypted_archive_cancel_prompt_aborts_quietly(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    archive_path = _make_encrypted_zip(tmp_path, password="pw123")
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+
+    destination = tmp_path / "out"
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(destination)
+    )
+    # 사용자가 비밀번호 입력을 취소하면 에러 다이얼로그 없이 조용히 중단해야 한다.
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("", False))
+    critical_calls = []
+    monkeypatch.setattr(
+        QMessageBox, "critical", lambda *a, **k: critical_calls.append(a)
+    )
+
+    window._on_extract()
+
+    assert critical_calls == []
+    assert not (destination / "secret.txt").exists()
+
+
 def test_double_click_non_image_entry_does_nothing(qtbot, tmp_path, monkeypatch):
     from packnine.application.compress_service import CompressService
     from packnine.presentation.gui import image_viewer as image_viewer_module

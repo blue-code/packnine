@@ -1,8 +1,13 @@
-"""표준 zipfile 기반 ZIP 어댑터.
+"""pyzipper(zipfile 포크) 기반 ZIP 어댑터.
 
 ArchiveReader/ArchiveWriter Protocol(packnine.domain.interfaces)을 구조적으로
 만족시키는 구현체이며, 해제 시 ArchiveSecurityPolicy로 전체 엔트리를 사전
 검증(all-or-nothing)한 뒤에만 실제 디스크에 쓴다.
+
+표준 zipfile 대신 pyzipper를 쓰는 이유: 표준 라이브러리는 암호화 zip을 "읽기"만
+지원(그마저 legacy ZipCrypto뿐)하고 "쓰기"는 아예 불가능하다. 초기 구현은 password를
+받아놓고 조용히 무시했는데, 사용자는 암호가 걸렸다고 믿게 되는 최악의 동작이라
+pyzipper로 교체해 AES-256 쓰기/읽기를 모두 지원한다(반디집/7-Zip과 호환).
 """
 from __future__ import annotations
 
@@ -12,7 +17,10 @@ import stat
 import time
 import zipfile
 
+import pyzipper
+
 from packnine.domain.entities import ArchiveEntry, ArchiveManifest
+from packnine.domain.exceptions import CorruptedArchiveError, InvalidPasswordError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
 from packnine.domain.value_objects import CompressionLevel
@@ -37,14 +45,34 @@ def _to_timestamp(date_time: tuple[int, int, int, int, int, int]) -> float | Non
         return None
 
 
+def _open_member(zf: zipfile.ZipFile, name: str, password_bytes: bytes | None):
+    """멤버 스트림을 열되, 라이브러리 예외를 도메인 예외로 변환한다.
+
+    pyzipper/zipfile은 암호 문제를 RuntimeError("Bad password...", "...password
+    required...")로 던지므로 메시지 기반으로 판별할 수밖에 없다(전용 예외 클래스가 없음).
+    """
+    try:
+        return zf.open(name, pwd=password_bytes)
+    except RuntimeError as exc:
+        message = str(exc).lower()
+        if "password" in message or "encrypted" in message:
+            raise InvalidPasswordError(
+                f"비밀번호가 틀렸거나 필요합니다: {name}"
+            ) from exc
+        raise
+
+
 class ZipArchiveReader:
-    """표준 zipfile을 사용하는 ZIP 해제 어댑터."""
+    """pyzipper를 사용하는 ZIP 해제 어댑터(일반/ZipCrypto/AES zip 모두 읽는다)."""
 
     def __init__(self, path: pathlib.Path, password: str | None = None) -> None:
         self._path = pathlib.Path(path)
         self._password = password
         self._password_bytes = password.encode("utf-8") if password else None
-        self._zf = zipfile.ZipFile(self._path, mode="r")
+        try:
+            self._zf = pyzipper.AESZipFile(self._path, mode="r")
+        except (pyzipper.BadZipFile, zipfile.BadZipFile) as exc:
+            raise CorruptedArchiveError(f"ZIP 파일이 손상되었습니다: {self._path}") from exc
         if self._password_bytes is not None:
             self._zf.setpassword(self._password_bytes)
 
@@ -82,6 +110,13 @@ class ZipArchiveReader:
         destination = pathlib.Path(destination)
         validated = self._validate_all(destination)
 
+        # 암호 오류는 디스크에 무언가 쓰기 전에 잡아야 한다(all-or-nothing).
+        # AES zip은 open 시점에 password verifier를 검사하므로, 첫 파일 엔트리를
+        # 열어보는 것만으로 실제 해제 전에 암호를 사전 검증할 수 있다.
+        first_file = next((entry for entry, _ in validated if not entry.is_dir), None)
+        if first_file is not None:
+            _open_member(self._zf, first_file.name, self._password_bytes).close()
+
         destination.mkdir(parents=True, exist_ok=True)
         total = len(validated)
         for done, (entry, target_path) in enumerate(validated, start=1):
@@ -89,7 +124,7 @@ class ZipArchiveReader:
                 target_path.mkdir(parents=True, exist_ok=True)
             else:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                with self._zf.open(entry.name, pwd=self._password_bytes) as src:
+                with _open_member(self._zf, entry.name, self._password_bytes) as src:
                     with target_path.open("wb") as dst:
                         shutil.copyfileobj(src, dst)
             if on_progress is not None:
@@ -110,7 +145,7 @@ class ZipArchiveReader:
             target_path.mkdir(parents=True, exist_ok=True)
         else:
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._zf.open(entry.name, pwd=self._password_bytes) as src:
+            with _open_member(self._zf, entry.name, self._password_bytes) as src:
                 with target_path.open("wb") as dst:
                     shutil.copyfileobj(src, dst)
 
@@ -119,14 +154,10 @@ class ZipArchiveReader:
 
 
 class ZipArchiveWriter:
-    """표준 zipfile을 사용하는 ZIP 압축 어댑터.
+    """pyzipper를 사용하는 ZIP 압축 어댑터.
 
-    주의(WHY): 표준 라이브러리 zipfile은 압축 해제(읽기) 시에만 ZipCrypto 기반의
-    legacy 비밀번호를 지원하고, 쓰기 시에는 어떤 방식의 암호화도 지원하지 않는다
-    (AES256은 물론 legacy ZipCrypto 쓰기조차 불가능). pyzipper 같은 서드파티 없이는
-    "진짜 암호화된 zip"을 만들 수 없으므로, 이 구현은 password가 주어져도 실제로는
-    암호를 걸지 않고 최소한 압축 자체는 정상 동작하도록 한다. 진짜 AES256 암호화가
-    필요하면 7z 어댑터(SevenZipArchiveWriter)를 사용해야 한다.
+    password가 주어지면 AES-256으로 실제 암호화한다(WZ_AES - 반디집/7-Zip/WinRAR과
+    호환되는 WinZip AES 방식). 무암호일 때는 표준 zipfile과 동일한 일반 zip을 만든다.
     """
 
     def __init__(
@@ -136,7 +167,7 @@ class ZipArchiveWriter:
         compression_level: CompressionLevel = CompressionLevel.NORMAL,
     ) -> None:
         self._path = pathlib.Path(path)
-        self._password = password  # 위 클래스 docstring 참고: 현재는 실제 암호화에 사용되지 않음
+        self._password = password
 
         if compression_level == CompressionLevel.STORE:
             compression = zipfile.ZIP_STORED
@@ -145,9 +176,19 @@ class ZipArchiveWriter:
             compression = zipfile.ZIP_DEFLATED
             compresslevel = int(compression_level)  # zlib deflate는 0~9 스케일과 동일
 
-        self._zf = zipfile.ZipFile(
-            self._path, mode="w", compression=compression, compresslevel=compresslevel
-        )
+        if password:
+            self._zf: zipfile.ZipFile = pyzipper.AESZipFile(
+                self._path,
+                mode="w",
+                compression=compression,
+                compresslevel=compresslevel,
+                encryption=pyzipper.WZ_AES,
+            )
+            self._zf.setpassword(password.encode("utf-8"))
+        else:
+            self._zf = zipfile.ZipFile(
+                self._path, mode="w", compression=compression, compresslevel=compresslevel
+            )
 
     def add_files(
         self,

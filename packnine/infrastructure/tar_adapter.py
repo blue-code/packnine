@@ -11,7 +11,7 @@ import pathlib
 import tarfile
 
 from packnine.domain.entities import ArchiveEntry, ArchiveManifest
-from packnine.domain.exceptions import UnsupportedFormatError
+from packnine.domain.exceptions import CorruptedArchiveError, UnsupportedFormatError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
 from packnine.domain.value_objects import CompressionLevel
@@ -42,7 +42,12 @@ class TarArchiveReader:
     def __init__(self, path: pathlib.Path, password: str | None = None) -> None:
         # tar는 암호화를 지원하지 않으므로 password는 무시한다(레지스트리 시그니처 통일용).
         self._path = pathlib.Path(path)
-        self._tf = tarfile.open(self._path, mode="r:*")
+        try:
+            self._tf = tarfile.open(self._path, mode="r:*")
+        except tarfile.ReadError as exc:
+            raise CorruptedArchiveError(
+                f"TAR 파일이 손상되었거나 tar 형식이 아닙니다: {self._path}"
+            ) from exc
 
     def list_entries(self) -> list[ArchiveEntry]:
         entries: list[ArchiveEntry] = []

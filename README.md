@@ -16,8 +16,9 @@ ZIP, 7Z, TAR 계열(GZ/BZ2/XZ) 압축·해제와 RAR 해제를 지원하며, 설
 
 - **압축**: ZIP, 7Z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ
 - **해제**: 위 포맷 전체 + RAR(해제 전용)
-- **암호 설정**: ZIP/7Z 아카이브에 AES-256 암호화 적용(7Z는 진짜 AES-256, ZIP은 표준
-  라이브러리 한계로 제한적)
+- **암호 설정**: ZIP/7Z 아카이브에 진짜 AES-256 암호화 적용(ZIP은 pyzipper 기반
+  WinZip AES 방식으로 반디집/7-Zip/WinRAR과 호환). 비밀번호가 틀리면 디스크에 쓰기 전에
+  차단하고, GUI/우클릭 메뉴에서는 비밀번호 입력 다이얼로그로 재시도할 수 있음
 - **압축률 선택**: 저장/빠름/보통/최대 등 압축 레벨 선택
 - **알아서 압축 / 알아서 압축풀기**: 목적지 경로·파일명을 다이얼로그 없이 자동으로 정해
   바로 처리 (`smart-compress`/`smart-extract`)
@@ -80,7 +81,8 @@ packnine
 # 압축 (확장자로 포맷을 자동 판별)
 packnine compress file1.txt file2.txt folder -o output.zip
 
-# 암호를 지정하여 7z로 압축 (진짜 AES-256 적용)
+# 암호를 지정하여 압축 (ZIP/7Z 모두 진짜 AES-256 적용)
+packnine compress folder -o output.zip --password "안전한암호"
 packnine compress folder -o output.7z --password "안전한암호"
 
 # 해제

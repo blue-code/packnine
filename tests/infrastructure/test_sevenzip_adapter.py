@@ -10,7 +10,7 @@ import pathlib
 import py7zr
 import pytest
 
-from packnine.domain.exceptions import UnsafeArchiveEntryError
+from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryError
 from packnine.infrastructure.sevenzip_adapter import (
     SevenZipArchiveReader,
     SevenZipArchiveWriter,
@@ -63,6 +63,33 @@ class TestSevenZipRoundTrip:
         reader.close()
 
         assert_tree_equal(src, dest / "secure_source")
+
+
+class TestSevenZipPasswordErrors:
+    def _make_encrypted_archive(self, tmp_path: pathlib.Path) -> pathlib.Path:
+        src = make_sample_source_tree(tmp_path, name="secure_source")
+        archive_path = tmp_path / "secure.7z"
+        writer = SevenZipArchiveWriter(archive_path, password="s3cr3t!")
+        writer.add_files([src])
+        writer.close()
+        return archive_path
+
+    def test_wrong_password_raises_invalid_password_error(self, tmp_path: pathlib.Path):
+        # py7zr은 헤더 암호화된 7z를 틀린 암호로 열면 깨진 헤더를 읽다가 TypeError 같은
+        # 내부 예외를 그대로 던진다. 사용자에게는 "비밀번호가 틀렸다"로 보여야 하므로
+        # 어댑터가 도메인 예외(InvalidPasswordError)로 변환해야 한다.
+        archive_path = self._make_encrypted_archive(tmp_path)
+
+        with pytest.raises(InvalidPasswordError):
+            reader = SevenZipArchiveReader(archive_path, password="wrong-password")
+            reader.extract_all(tmp_path / "should_not_extract")
+
+    def test_missing_password_raises_invalid_password_error(self, tmp_path: pathlib.Path):
+        archive_path = self._make_encrypted_archive(tmp_path)
+
+        with pytest.raises(InvalidPasswordError):
+            reader = SevenZipArchiveReader(archive_path)
+            reader.list_entries()
 
 
 class TestSevenZipProgressCallback:

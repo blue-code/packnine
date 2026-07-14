@@ -64,6 +64,34 @@ def test_compress_missing_source_raises_file_not_found(tmp_path: pathlib.Path) -
     assert not destination.exists()
 
 
+def test_compress_creates_missing_destination_directory(tmp_path: pathlib.Path) -> None:
+    # 우클릭 "PackNine으로 압축하기"에서 --dest-dir이 아직 없는 폴더를 가리키면
+    # FileNotFoundError로 죽는 문제가 있었다. 해제(extract)는 대상 폴더를 자동
+    # 생성하므로 압축도 동일하게 출력 폴더를 만들어 주는 것이 일관된 동작이다.
+    src_dir = make_sample_source_tree(tmp_path)
+    destination = tmp_path / "not_yet" / "deep" / "out.zip"
+    service = CompressService()
+
+    manifest = service.compress([src_dir], destination)
+
+    assert destination.exists()
+    assert isinstance(manifest, ArchiveManifest)
+
+
+def test_compress_missing_source_does_not_create_destination_directory(
+    tmp_path: pathlib.Path,
+) -> None:
+    # 소스 검증 실패 시에는 부수 효과(빈 출력 폴더 생성)도 없어야 한다.
+    missing = tmp_path / "does_not_exist.txt"
+    destination = tmp_path / "not_yet" / "out.zip"
+    service = CompressService()
+
+    with pytest.raises(FileNotFoundError):
+        service.compress([missing], destination)
+
+    assert not destination.parent.exists()
+
+
 def test_compress_rar_destination_raises_unsupported_format(tmp_path: pathlib.Path) -> None:
     src_dir = make_sample_source_tree(tmp_path)
     destination = tmp_path / "out.rar"
