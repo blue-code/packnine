@@ -72,6 +72,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="자동 계산된 파일명을 이 디렉터리 아래에 둔다(없으면 원본과 같은 위치)",
     )
+    smart_compress_parser.add_argument(
+        "--each",
+        action="store_true",
+        help="선택한 항목들을 하나로 묶지 않고 항목별로 각각 압축한다(각각 압축하기)",
+    )
 
     smart_extract_parser = subparsers.add_parser(
         "smart-extract", help="아카이브 내용에 맞춰 해제 위치를 자동으로 정한다(알아서 압축풀기)"
@@ -165,7 +170,54 @@ def _has_console() -> bool:
         return False
 
 
+def _smart_compress_each(args: argparse.Namespace) -> int:
+    """선택 항목들을 항목별로 각각 압축한다(반디집 "각각 압축하기" 대응).
+
+    하나가 실패해도 나머지는 계속 진행하고, 실패가 하나라도 있으면 1을 반환한다.
+    """
+    service = CompressService()
+    level = _compression_level_from_int(args.level)
+    dest_dir = pathlib.Path(args.dest_dir) if args.dest_dir else None
+    use_gui_progress = not _has_console()
+
+    if use_gui_progress:
+        from packnine.presentation.gui import quick_progress
+
+    had_failure = False
+    for source_str in args.sources:
+        source = pathlib.Path(source_str)
+        auto_name = smart_naming.resolve_smart_compress_destination([source]).name
+        destination = (dest_dir / auto_name) if dest_dir else source.parent / auto_name
+
+        def operation(on_progress, _source=source, _destination=destination):
+            return service.compress(
+                [_source],
+                _destination,
+                password=args.password,
+                compression_level=level,
+                on_progress=on_progress,
+            )
+
+        if use_gui_progress:
+            if not quick_progress.run_with_progress(f"압축 중: {source.name}", operation):
+                had_failure = True
+            continue
+
+        try:
+            manifest = operation(None)
+        except (FileNotFoundError, OSError) as exc:
+            print(f"실패: {source} - {exc}")
+            had_failure = True
+        else:
+            print(f"성공: {destination} ({len(manifest.entries)}개 항목)")
+
+    return 1 if had_failure else 0
+
+
 def _cmd_smart_compress(args: argparse.Namespace) -> int:
+    if args.each:
+        return _smart_compress_each(args)
+
     service = CompressService()
     sources = [pathlib.Path(p) for p in args.sources]
     level = _compression_level_from_int(args.level)

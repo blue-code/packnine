@@ -45,6 +45,32 @@ def _to_timestamp(date_time: tuple[int, int, int, int, int, int]) -> float | Non
         return None
 
 
+_UTF8_FLAG = 0x800  # general purpose bit 11: 파일명이 UTF-8임을 나타내는 zip 표준 플래그
+
+
+def _decode_legacy_filename(info: zipfile.ZipInfo) -> str:
+    """UTF-8 플래그가 없는 엔트리명의 원래 인코딩을 자동 감지해 복원한다.
+
+    zipfile은 플래그 없는 이름을 무조건 cp437로 디코딩하는데, 알집/구형 도구가 만든
+    zip은 실제로는 cp949 바이트라 한글이 깨진다. cp437은 256바이트 전부에 1:1 대응하는
+    문자가 있어 encode('cp437')로 원본 바이트를 무손실 복원할 수 있고, 그 바이트를
+    UTF-8 → cp949 순으로 재판별한다(반디집의 "코드 페이지 자동 감지"에 대응).
+    """
+    if info.flag_bits & _UTF8_FLAG:
+        return info.filename
+    try:
+        raw = info.filename.encode("cp437")
+    except UnicodeEncodeError:
+        # cp437 왕복이 안 되는 이름은 zipfile이 이미 다른 경로로 디코딩한 것 - 그대로 둔다.
+        return info.filename
+    for codec in ("utf-8", "cp949"):
+        try:
+            return raw.decode(codec)
+        except UnicodeDecodeError:
+            continue
+    return info.filename
+
+
 def _open_member(zf: zipfile.ZipFile, name: str, password_bytes: bytes | None):
     """멤버 스트림을 열되, 라이브러리 예외를 도메인 예외로 변환한다.
 
@@ -75,13 +101,22 @@ class ZipArchiveReader:
             raise CorruptedArchiveError(f"ZIP 파일이 손상되었습니다: {self._path}") from exc
         if self._password_bytes is not None:
             self._zf.setpassword(self._password_bytes)
+        # 자동 감지로 복원한 표시용 이름 -> zipfile 내부(cp437) 이름 매핑.
+        # 해제 시 zf.open()에는 내부 이름을 넘겨야 실제 엔트리를 찾을 수 있다.
+        self._stored_names: dict[str, str] = {}
+
+    def _stored_name(self, display_name: str) -> str:
+        return self._stored_names.get(display_name, display_name)
 
     def list_entries(self) -> list[ArchiveEntry]:
         entries: list[ArchiveEntry] = []
         for info in self._zf.infolist():
+            display_name = _decode_legacy_filename(info)
+            if display_name != info.filename:
+                self._stored_names[display_name] = info.filename
             entries.append(
                 ArchiveEntry(
-                    name=info.filename,
+                    name=display_name,
                     size=info.file_size,
                     compressed_size=info.compress_size,
                     is_dir=info.filename.endswith("/"),
@@ -115,7 +150,7 @@ class ZipArchiveReader:
         # 열어보는 것만으로 실제 해제 전에 암호를 사전 검증할 수 있다.
         first_file = next((entry for entry, _ in validated if not entry.is_dir), None)
         if first_file is not None:
-            _open_member(self._zf, first_file.name, self._password_bytes).close()
+            _open_member(self._zf, self._stored_name(first_file.name), self._password_bytes).close()
 
         destination.mkdir(parents=True, exist_ok=True)
         total = len(validated)
@@ -124,7 +159,7 @@ class ZipArchiveReader:
                 target_path.mkdir(parents=True, exist_ok=True)
             else:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                with _open_member(self._zf, entry.name, self._password_bytes) as src:
+                with _open_member(self._zf, self._stored_name(entry.name), self._password_bytes) as src:
                     with target_path.open("wb") as dst:
                         shutil.copyfileobj(src, dst)
             if on_progress is not None:
@@ -145,7 +180,7 @@ class ZipArchiveReader:
             target_path.mkdir(parents=True, exist_ok=True)
         else:
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            with _open_member(self._zf, entry.name, self._password_bytes) as src:
+            with _open_member(self._zf, self._stored_name(entry.name), self._password_bytes) as src:
                 with target_path.open("wb") as dst:
                     shutil.copyfileobj(src, dst)
 

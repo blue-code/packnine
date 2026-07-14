@@ -129,6 +129,125 @@ def test_double_click_image_entry_opens_viewer(qtbot, tmp_path, monkeypatch):
     assert not image_paths[0].exists()
 
 
+def test_table_sorts_size_column_numerically(qtbot, tmp_path):
+    # "10" < "9" 문자열 정렬이 아니라 9 < 10 숫자 정렬이어야 한다.
+    from PySide6.QtCore import Qt
+
+    from packnine.application.compress_service import CompressService
+
+    small = tmp_path / "small.txt"
+    small.write_text("x" * 9, encoding="utf-8")
+    big = tmp_path / "big.txt"
+    big.write_text("y" * 1000, encoding="utf-8")
+    archive_path = tmp_path / "out.zip"
+    CompressService().compress([small, big], archive_path)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+
+    assert window._table.isSortingEnabled()
+    window._table.sortItems(1, Qt.SortOrder.AscendingOrder)
+    sizes = [
+        window._table.item(row, 1).data(Qt.ItemDataRole.DisplayRole)
+        for row in range(window._table.rowCount())
+    ]
+    assert sizes == sorted(sizes)
+    assert sizes[0] == 9  # 숫자로 저장되어 있어야 한다
+
+
+def test_add_files_action_appends_to_open_archive(qtbot, tmp_path, monkeypatch):
+    from packnine.application.compress_service import CompressService
+
+    src_file = tmp_path / "a.txt"
+    src_file.write_text("hello", encoding="utf-8")
+    archive_path = tmp_path / "out.zip"
+    CompressService().compress([src_file], archive_path)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+
+    new_file = tmp_path / "extra.txt"
+    new_file.write_text("extra", encoding="utf-8")
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileNames", lambda *a, **k: ([str(new_file)], "")
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    window._on_add_files()
+
+    names = {
+        window._table.item(row, 0).text() for row in range(window._table.rowCount())
+    }
+    assert "extra.txt" in names and "a.txt" in names
+
+
+def test_remove_selected_action_deletes_entry(qtbot, tmp_path, monkeypatch):
+    from packnine.application.compress_service import CompressService
+
+    a = tmp_path / "a.txt"
+    a.write_text("aaa", encoding="utf-8")
+    b = tmp_path / "b.txt"
+    b.write_text("bbb", encoding="utf-8")
+    archive_path = tmp_path / "out.zip"
+    CompressService().compress([a, b], archive_path)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+
+    # a.txt 행을 선택하고 삭제 - 확인 다이얼로그는 '예'로 모킹한다.
+    target_row = next(
+        row
+        for row in range(window._table.rowCount())
+        if window._table.item(row, 0).text() == "a.txt"
+    )
+    window._table.selectRow(target_row)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+
+    window._on_remove_selected()
+
+    names = {
+        window._table.item(row, 0).text() for row in range(window._table.rowCount())
+    }
+    assert "a.txt" not in names and "b.txt" in names
+
+
+def test_double_click_text_entry_opens_with_default_app(qtbot, tmp_path, monkeypatch):
+    # 반디집처럼 아카이브 안의 일반 파일(문서 등)을 더블클릭하면 임시로 꺼내
+    # 기본 연결 프로그램으로 열어야 한다(이미지는 내장 뷰어가 우선).
+    from PySide6.QtGui import QDesktopServices
+
+    from packnine.application.compress_service import CompressService
+
+    src_file = tmp_path / "notes.txt"
+    src_file.write_text("open me", encoding="utf-8")
+    archive_path = tmp_path / "out.zip"
+    CompressService().compress([src_file], archive_path)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+
+    opened_urls = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened_urls.append(url) or True)
+
+    window._on_table_double_clicked(0, 0)
+
+    assert len(opened_urls) == 1
+    opened_path = pathlib.Path(opened_urls[0].toLocalFile())
+    assert opened_path.name == "notes.txt"
+    # 외부 프로그램이 읽는 동안 파일이 존재해야 한다(즉시 삭제 금지).
+    assert opened_path.read_text(encoding="utf-8") == "open me"
+
+    # 창을 닫으면 임시 파일이 정리되어야 한다.
+    window.close()
+    assert not opened_path.exists()
+
+
 def _make_encrypted_zip(tmp_path: pathlib.Path, password: str) -> pathlib.Path:
     from packnine.application.compress_service import CompressService
 

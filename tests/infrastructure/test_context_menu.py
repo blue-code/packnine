@@ -85,6 +85,22 @@ def test_register_creates_distinct_menu_entries_for_wildcard_and_extension():
     assert _query_verb_command(_FAKE_EXTENSIONS[0], context_menu._EXTRACT_VERB) is None
 
 
+def test_register_creates_open_and_compress_each_entries():
+    # 반디집 기본 메뉴 대응: 아카이브 "PackNine으로 열기", 전체 파일 "각각 압축하기".
+    context_menu.register()
+
+    open_cmd = _query_verb_command(_FAKE_EXTENSIONS[0], context_menu._OPEN_VERB)
+    each_cmd = _query_verb_command("*", context_menu._COMPRESS_EACH_VERB)
+
+    assert open_cmd is not None and " open " in open_cmd
+    assert each_cmd is not None and "--each" in each_cmd
+
+    context_menu.unregister()
+
+    assert _query_verb_command(_FAKE_EXTENSIONS[0], context_menu._OPEN_VERB) is None
+    assert _query_verb_command("*", context_menu._COMPRESS_EACH_VERB) is None
+
+
 def test_register_sets_file_association_to_packnine():
     context_menu.register()
 

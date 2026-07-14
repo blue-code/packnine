@@ -152,6 +152,61 @@ class TestZipProgressCallback:
         assert len(calls) > 0
 
 
+class _Cp949ZipInfo(zipfile.ZipInfo):
+    """UTF-8 플래그 없이 cp949 바이트로 파일명을 기록하는 레거시 zip 재현용.
+
+    표준 zipfile은 비ASCII 이름을 쓰면 무조건 UTF-8 플래그를 세우므로, 알집/구형
+    도구가 만드는 "cp949 바이트 + 플래그 없음" zip은 내부 인코딩 훅을 오버라이드해야만
+    테스트에서 재현할 수 있다(비공개 API지만 테스트 전용이라 허용).
+    """
+
+    def _encodeFilenameFlags(self):  # noqa: N802 - zipfile 내부 훅 이름 유지
+        return self.filename.encode("cp949"), self.flag_bits
+
+
+class TestZipLegacyKoreanFilenames:
+    def _make_legacy_zip(self, tmp_path: pathlib.Path) -> pathlib.Path:
+        archive_path = tmp_path / "legacy.zip"
+        with zipfile.ZipFile(archive_path, "w") as zf:
+            info = _Cp949ZipInfo("한글폴더/보고서.txt")
+            zf.writestr(info, "내용".encode("utf-8"))
+        return archive_path
+
+    def test_list_entries_decodes_cp949_names(self, tmp_path: pathlib.Path):
+        # 알집 등이 만든 레거시 zip은 파일명이 cp949 바이트인데, zipfile이 cp437로
+        # 잘못 디코딩해 한글이 깨진다. 반디집처럼 자동 감지해서 복원해야 한다.
+        archive_path = self._make_legacy_zip(tmp_path)
+
+        reader = ZipArchiveReader(archive_path)
+        names = {e.name for e in reader.list_entries()}
+        reader.close()
+
+        assert "한글폴더/보고서.txt" in names
+
+    def test_extract_all_writes_decoded_korean_paths(self, tmp_path: pathlib.Path):
+        archive_path = self._make_legacy_zip(tmp_path)
+        dest = tmp_path / "extracted"
+
+        reader = ZipArchiveReader(archive_path)
+        reader.extract_all(dest)
+        reader.close()
+
+        target = dest / "한글폴더" / "보고서.txt"
+        assert target.read_text(encoding="utf-8") == "내용"
+
+    def test_utf8_flagged_names_are_untouched(self, tmp_path: pathlib.Path):
+        # 정상 UTF-8 zip(플래그 있음)은 재판별 대상이 아니어야 한다(회귀 방지).
+        archive_path = tmp_path / "utf8.zip"
+        with zipfile.ZipFile(archive_path, "w") as zf:
+            zf.writestr("한글.txt", "ok")
+
+        reader = ZipArchiveReader(archive_path)
+        names = {e.name for e in reader.list_entries()}
+        reader.close()
+
+        assert names == {"한글.txt"}
+
+
 class TestZipCorruptedArchive:
     def test_corrupted_zip_raises_corrupted_archive_error(self, tmp_path: pathlib.Path):
         # 라이브러리 예외(BadZipFile)가 그대로 새어 나가면 CLI가 traceback을 뿜는다.

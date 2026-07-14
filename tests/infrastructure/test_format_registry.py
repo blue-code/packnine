@@ -84,12 +84,28 @@ class TestGetWriter:
 
 
 class TestUnsupportedExtension:
-    @pytest.mark.parametrize("filename", ["archive.txt", "archive.gz", "archive.unknown", "noext"])
+    # .gz는 v0.3 이후 단일 파일 해제를 지원하므로 미지원 목록에서 제외되었다.
+    @pytest.mark.parametrize("filename", ["archive.txt", "archive.unknown", "noext"])
     def test_unsupported_extension_raises_for_reader(self, tmp_path: pathlib.Path, filename: str):
         with pytest.raises(UnsupportedFormatError):
             format_registry.get_reader(tmp_path / filename)
 
-    @pytest.mark.parametrize("filename", ["archive.txt", "archive.gz", "archive.unknown", "noext"])
+    # 단일 파일 압축(.gz/.bz2/.xz)은 해제 전용 - 쓰기는 여전히 거부해야 한다.
+    @pytest.mark.parametrize(
+        "filename", ["archive.txt", "archive.gz", "archive.bz2", "archive.xz", "noext"]
+    )
     def test_unsupported_extension_raises_for_writer(self, tmp_path: pathlib.Path, filename: str):
         with pytest.raises(UnsupportedFormatError):
             format_registry.get_writer(tmp_path / filename)
+
+    @pytest.mark.parametrize("suffix", [".gz", ".bz2", ".xz"])
+    def test_single_file_extensions_resolve_to_reader(self, tmp_path: pathlib.Path, suffix: str):
+        import gzip, bz2, lzma  # noqa: E401 - 테스트 데이터 생성용
+
+        compressor = {".gz": gzip.compress, ".bz2": bz2.compress, ".xz": lzma.compress}[suffix]
+        path = tmp_path / f"single{suffix}"
+        path.write_bytes(compressor(b"data"))
+
+        reader = format_registry.get_reader(path)
+        assert reader.list_entries()[0].name == "single"
+        reader.close()

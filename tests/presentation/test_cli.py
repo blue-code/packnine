@@ -87,6 +87,39 @@ def test_smart_compress_single_file_uses_stem_name(tmp_path, capsys, monkeypatch
     assert str(expected_destination) in output
 
 
+def test_smart_compress_each_creates_one_archive_per_source(tmp_path, capsys, monkeypatch):
+    # 반디집 "각각 압축하기": 여러 항목을 선택해도 하나로 묶지 않고 항목별 zip을 만든다.
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    a = tmp_path / "alpha.txt"
+    a.write_text("aaa", encoding="utf-8")
+    b = tmp_path / "beta.txt"
+    b.write_text("bbb", encoding="utf-8")
+
+    exit_code = main(["smart-compress", "--each", str(a), str(b)])
+
+    assert exit_code == 0
+    assert (tmp_path / "alpha.zip").exists()
+    assert (tmp_path / "beta.zip").exists()
+    output = capsys.readouterr().out
+    assert "alpha.zip" in output and "beta.zip" in output
+
+
+def test_smart_compress_each_continues_after_one_failure(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    good = tmp_path / "good.txt"
+    good.write_text("ok", encoding="utf-8")
+    missing = tmp_path / "does_not_exist.txt"
+
+    exit_code = main(["smart-compress", "--each", str(missing), str(good)])
+
+    assert exit_code == 1
+    assert (tmp_path / "good.zip").exists()
+    output = capsys.readouterr().out
+    assert "실패" in output
+
+
 def test_smart_extract_multiple_archives_each_processed(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 

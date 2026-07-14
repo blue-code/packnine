@@ -28,10 +28,12 @@ import shutil
 import sys
 
 _COMPRESS_VERB = "PackNineCompress"
+_COMPRESS_EACH_VERB = "PackNineCompressEach"
 _EXTRACT_VERB = "PackNineExtract"
-# .gz/.bz2/.xz는 tar가 아닌 순수 단일 파일 압축(비-tar)일 수도 있어 의미가 모호하므로
-# 파일 연결/우클릭 대상에서 제외한다. .tgz는 항상 tar+gzip을 의미하므로 안전하게 포함한다.
-_ARCHIVE_EXTENSIONS = (".zip", ".7z", ".rar", ".tar", ".tgz")
+_OPEN_VERB = "PackNineOpen"
+# .gz/.bz2/.xz는 tar.gz 같은 복합 확장자든 순수 단일 파일 압축이든
+# format_registry가 양쪽 모두 처리하므로(단일 파일 해제 지원 추가) 대상에 포함한다.
+_ARCHIVE_EXTENSIONS = (".zip", ".7z", ".rar", ".tar", ".tgz", ".gz", ".bz2", ".xz")
 _PROG_ID = "PackNine.Archive"
 _ASSOC_BACKUP_KEY = r"Software\PackNine\PreviousFileAssociations"
 
@@ -216,6 +218,14 @@ def register() -> None:
             "PackNine으로 압축하기",
             multi_select=True,
         )
+        # 반디집 "각각 압축하기": 다중 선택 시 하나로 묶지 않고 항목별 zip을 만든다.
+        _create_menu_key(
+            r"Software\Classes\*",
+            _COMPRESS_EACH_VERB,
+            f"{packnine_cmd} smart-compress --each %*",
+            "PackNine으로 각각 압축하기",
+            multi_select=True,
+        )
 
         for ext in _ARCHIVE_EXTENSIONS:
             _create_menu_key(
@@ -224,6 +234,14 @@ def register() -> None:
                 f"{packnine_cmd} smart-extract %*",
                 "PackNine으로 압축풀기",
                 multi_select=True,
+            )
+            # 더블클릭 기본 동작(파일 연결)과 별개로, 우클릭에서도 명시적으로
+            # "열기"를 제공한다(기본 프로그램이 다른 압축 프로그램인 경우 대비).
+            _create_menu_key(
+                rf"Software\Classes\{ext}",
+                _OPEN_VERB,
+                f'{packnine_cmd} open "%1"',
+                "PackNine으로 열기",
             )
 
         # 파일 연결: 더블클릭하면 GUI로 열어 내용을 보여준다(압축풀기와는 별개의 동작).
@@ -246,8 +264,10 @@ def unregister() -> None:
 
     try:
         _delete_menu_key(r"Software\Classes\*", _COMPRESS_VERB)
+        _delete_menu_key(r"Software\Classes\*", _COMPRESS_EACH_VERB)
         for ext in _ARCHIVE_EXTENSIONS:
             _delete_menu_key(rf"Software\Classes\{ext}", _EXTRACT_VERB)
+            _delete_menu_key(rf"Software\Classes\{ext}", _OPEN_VERB)
             _restore_default(ext)
         _unregister_prog_id()
     except OSError as exc:

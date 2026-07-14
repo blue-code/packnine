@@ -14,6 +14,7 @@ from packnine.infrastructure.sevenzip_adapter import (
     SevenZipArchiveReader,
     SevenZipArchiveWriter,
 )
+from packnine.infrastructure.singlefile_adapter import SingleFileArchiveReader
 from packnine.infrastructure.tar_adapter import TarArchiveReader, TarArchiveWriter
 from packnine.infrastructure.zip_adapter import ZipArchiveReader, ZipArchiveWriter
 
@@ -27,6 +28,10 @@ _SUPPORTED_EXTENSIONS = (
     ".zip",
     ".7z",
     ".rar",
+    # 복합(.tar.*)에 해당하지 않는 순수 단일 파일 압축 - 반드시 tar 계열 뒤에 둔다.
+    ".gz",
+    ".bz2",
+    ".xz",
 )
 
 _READER_CLASSES: dict[str, type] = {
@@ -38,6 +43,9 @@ _READER_CLASSES: dict[str, type] = {
     ".tar.bz2": TarArchiveReader,
     ".tar.xz": TarArchiveReader,
     ".rar": RarArchiveReader,
+    ".gz": SingleFileArchiveReader,
+    ".bz2": SingleFileArchiveReader,
+    ".xz": SingleFileArchiveReader,
 }
 
 _WRITER_CLASSES: dict[str, type] = {
@@ -83,5 +91,9 @@ def get_writer(
     ext = _resolve_extension(path)
     if ext == ".rar":
         raise UnsupportedFormatError("RAR 포맷으로의 쓰기는 지원하지 않습니다 (라이선스 제약)")
+    if ext not in _WRITER_CLASSES:
+        raise UnsupportedFormatError(
+            f"{ext} 포맷으로의 압축은 지원하지 않습니다 (해제 전용). ZIP/7Z/TAR를 사용하세요."
+        )
     writer_cls = _WRITER_CLASSES[ext]
     return writer_cls(path, password=password, compression_level=compression_level)
