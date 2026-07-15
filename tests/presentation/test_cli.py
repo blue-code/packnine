@@ -222,6 +222,43 @@ def test_smart_compress_works_without_console(tmp_path, monkeypatch):
     assert calls == ["압축 중..."]
 
 
+def test_smart_extract_without_console_opens_result_folder(tmp_path, monkeypatch):
+    # 탐색기 우클릭(콘솔 없음)으로 "알아서 풀기" 성공 시, 결과 폴더를 탐색기로 열어
+    # 시각적 피드백을 줘야 한다(이전에는 진행률 창만 깜빡이고 아무것도 안 보였음).
+    import pathlib
+
+    monkeypatch.setattr("sys.stdout", None)
+
+    src_dir = tmp_path / "proj"
+    src_dir.mkdir()
+    (src_dir / "f.txt").write_text("x", encoding="utf-8")
+    archive = tmp_path / "proj.zip"
+    assert main(["compress", str(src_dir), "-o", str(archive)]) == 0
+
+    # 진행률 창은 실제로 띄우지 않고 operation만 실행해 성공시킨다.
+    def _fake_retry(title, operation, archive_name="", initial_password=None):
+        operation(None, initial_password)
+        return True
+
+    monkeypatch.setattr(
+        "packnine.presentation.gui.quick_progress.run_extract_with_password_retry",
+        _fake_retry,
+    )
+    opened: list = []
+    monkeypatch.setattr(
+        "packnine.presentation.cli._open_folder",
+        lambda p: opened.append(pathlib.Path(p)),
+    )
+
+    exit_code = main(["smart-extract", str(archive)])
+
+    assert exit_code == 0
+    # 최상위 폴더가 하나(proj/)라 아카이브와 같은 폴더에 그대로 풀린다.
+    assert (tmp_path / "proj" / "f.txt").exists()
+    # 결과 폴더가 탐색기로 열려야 한다.
+    assert opened == [tmp_path]
+
+
 def test_open_command_launches_gui_with_archive(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
