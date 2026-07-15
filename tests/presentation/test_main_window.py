@@ -182,6 +182,123 @@ def test_double_click_image_entry_opens_viewer(qtbot, tmp_path, monkeypatch):
     assert not image_paths[0].exists()
 
 
+def test_file_association_registers_and_offers_settings(qtbot, monkeypatch):
+    # "파일 연결 설정"은 연결 프로그램 등록을 수행하고 Windows 기본 앱 설정을 열도록 안내한다.
+    from PySide6.QtGui import QDesktopServices
+
+    from packnine.application import context_menu_service
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    registered = []
+    monkeypatch.setattr(
+        context_menu_service.ContextMenuService,
+        "register",
+        lambda self: registered.append(True),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True
+    )
+
+    window._on_file_association()
+
+    assert registered == [True]
+    assert opened and "ms-settings:defaultapps" in opened[0]
+
+
+def test_selecting_image_shows_left_preview(qtbot, tmp_path):
+    # 목록에서 이미지 파일을 선택하면 좌측 네비 패널 아래 미리보기에 그 이미지가 뜬다.
+    from PySide6.QtGui import QImage
+
+    from packnine.application.compress_service import CompressService
+
+    src = tmp_path / "pics"
+    src.mkdir()
+    image = QImage(16, 16, QImage.Format.Format_RGB32)
+    image.fill(0xFF00FF00)
+    image.save(str(src / "green.png"))
+    (src / "notes.txt").write_text("not an image", encoding="utf-8")
+    archive = tmp_path / "out.zip"
+    CompressService().compress([src], archive)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(900, 600)
+    window.show()
+    qtbot.waitExposed(window)
+    window._open_archive(archive)
+
+    # pics 폴더로 진입
+    pics_row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == "pics"
+    )
+    window._on_table_double_clicked(pics_row, 0)
+
+    # green.png 행을 선택하면 미리보기 픽스맵이 채워져야 한다.
+    img_row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == "green.png"
+    )
+    window._table.selectRow(img_row)
+    qtbot.wait(100)
+
+    pm = window._preview_image_label.pixmap()
+    assert pm is not None and not pm.isNull()
+    assert "green.png" in window._preview_caption.text()
+
+
+def test_selecting_non_image_clears_preview(qtbot, tmp_path):
+    from PySide6.QtGui import QImage
+
+    from packnine.application.compress_service import CompressService
+
+    src = tmp_path / "pics"
+    src.mkdir()
+    image = QImage(16, 16, QImage.Format.Format_RGB32)
+    image.fill(0xFF0000FF)
+    image.save(str(src / "blue.png"))
+    (src / "notes.txt").write_text("plain text", encoding="utf-8")
+    archive = tmp_path / "out.zip"
+    CompressService().compress([src], archive)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(900, 600)
+    window.show()
+    qtbot.waitExposed(window)
+    window._open_archive(archive)
+    pics_row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == "pics"
+    )
+    window._on_table_double_clicked(pics_row, 0)
+
+    # 이미지 선택 → 미리보기 채움
+    img_row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == "blue.png"
+    )
+    window._table.selectRow(img_row)
+    qtbot.wait(100)
+    assert not window._preview_image_label.pixmap().isNull()
+
+    # 텍스트 파일 선택 → 미리보기 비움
+    txt_row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == "notes.txt"
+    )
+    window._table.selectRow(txt_row)
+    qtbot.wait(100)
+    pm = window._preview_image_label.pixmap()
+    assert pm is None or pm.isNull()
+
+
 def test_table_sorts_size_column_numerically(qtbot, tmp_path):
     # "10" < "9" 문자열 정렬이 아니라 9 < 10 숫자 정렬이어야 한다.
     from PySide6.QtCore import Qt

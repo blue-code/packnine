@@ -129,6 +129,20 @@ class TestFlatVerbRegistration:
         )
 
 
+def _open_with_progid_present(ext: str) -> bool:
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            rf"Software\Classes\{ext}\OpenWithProgids",
+        ) as key:
+            winreg.QueryValueEx(key, context_menu._PROG_ID)
+            return True
+    except FileNotFoundError:
+        return False
+
+
 class TestFileAssociation:
     def test_register_sets_file_association_to_packnine(self):
         context_menu.register()
@@ -140,6 +154,32 @@ class TestFileAssociation:
             rf"Software\Classes\{context_menu._PROG_ID}\shell\open\command"
         )
         assert open_cmd is not None and "open" in open_cmd
+
+        context_menu.unregister()
+
+    def test_register_adds_open_with_progid_and_unregister_removes_it(self):
+        # OpenWithProgids: 기본 프로그램을 빼앗지 않고 "연결 프로그램" 목록에만 PackNine을
+        # 추가한다. UserChoice로 기본 앱이 잠겨 있어도 사용자가 목록에서 고를 수 있다.
+        context_menu.register()
+        for ext in _FAKE_EXTENSIONS:
+            assert _open_with_progid_present(ext), ext
+
+        context_menu.unregister()
+        for ext in _FAKE_EXTENSIONS:
+            assert not _open_with_progid_present(ext), ext
+
+    def test_supported_types_registered_for_open_with_dialog(self):
+        # Applications\PackNine.exe에 SupportedTypes를 등록하면 "다른 앱 선택" 목록에
+        # PackNine이 아카이브 확장자용으로 나타난다.
+        context_menu.register()
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            rf"Software\Classes\Applications\{context_menu._APP_EXE_KEY}\SupportedTypes",
+        ) as key:
+            for ext in _FAKE_EXTENSIONS:
+                winreg.QueryValueEx(key, ext)  # 없으면 FileNotFoundError
 
         context_menu.unregister()
 

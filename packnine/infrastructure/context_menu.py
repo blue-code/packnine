@@ -60,6 +60,8 @@ _LEGACY_CASCADE_VERB = "PackNine"
 _ARCHIVE_EXTENSIONS = (".zip", ".7z", ".rar", ".tar", ".tgz", ".gz", ".bz2", ".xz")
 _PROG_ID = "PackNine.Archive"
 _ASSOC_BACKUP_KEY = r"Software\PackNine\PreviousFileAssociations"
+# "다른 앱 선택" 목록에 PackNine을 노출하기 위한 Applications 하위 키 이름.
+_APP_EXE_KEY = "PackNine.exe"
 
 
 def _require_windows() -> None:
@@ -172,10 +174,61 @@ def _register_prog_id(open_command: str, icon_reference: str) -> None:
     prog_key = rf"Software\Classes\{_PROG_ID}"
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, prog_key) as key:
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "PackNine 압축 파일")
+        winreg.SetValueEx(key, "FriendlyTypeName", 0, winreg.REG_SZ, "PackNine 압축 파일")
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{prog_key}\DefaultIcon") as key:
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_reference)
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{prog_key}\shell\open\command") as key:
         winreg.SetValueEx(key, "", 0, winreg.REG_SZ, open_command)
+
+
+def _register_open_with(open_command: str, icon_reference: str) -> None:
+    r"""PackNine을 아카이브 확장자의 "연결 프로그램" 목록에 (비파괴적으로) 노출한다.
+
+    두 가지를 등록한다:
+    1) 각 확장자의 OpenWithProgids에 PackNine.Archive 추가 - 기본 프로그램을 빼앗지 않고
+       "연결 프로그램" 목록에만 넣는다. Windows UserChoice로 기본 앱이 잠겨 있어도 사용자가
+       목록에서 PackNine을 고를 수 있다(기본값을 몰래 바꾸는 건 Windows가 막는다).
+    2) Applications\PackNine.exe에 open 명령 + SupportedTypes - "다른 앱 선택" 대화상자에
+       PackNine이 나타나게 한다.
+    """
+    import winreg
+
+    app_key = rf"Software\Classes\Applications\{_APP_EXE_KEY}"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_key) as key:
+        winreg.SetValueEx(key, "FriendlyAppName", 0, winreg.REG_SZ, "PackNine")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{app_key}\DefaultIcon") as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_reference)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{app_key}\shell\open\command") as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, open_command)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{app_key}\SupportedTypes") as key:
+        for ext in _ARCHIVE_EXTENSIONS:
+            winreg.SetValueEx(key, ext, 0, winreg.REG_SZ, "")
+
+    for ext in _ARCHIVE_EXTENSIONS:
+        with winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}\OpenWithProgids"
+        ) as key:
+            # OpenWithProgids의 값은 이름=ProgID, 데이터는 비어 있는 REG_NONE 관례.
+            winreg.SetValueEx(key, _PROG_ID, 0, winreg.REG_NONE, b"")
+
+
+def _unregister_open_with() -> None:
+    import winreg
+
+    _delete_tree(
+        winreg.HKEY_CURRENT_USER, rf"Software\Classes\Applications\{_APP_EXE_KEY}"
+    )
+    for ext in _ARCHIVE_EXTENSIONS:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                rf"Software\Classes\{ext}\OpenWithProgids",
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                winreg.DeleteValue(key, _PROG_ID)
+        except (FileNotFoundError, OSError):
+            pass
 
 
 def _unregister_prog_id() -> None:
@@ -298,10 +351,10 @@ def register() -> None:
             )
 
         # 파일 연결: 더블클릭하면 GUI로 열어 내용을 보여준다(압축풀기와는 별개의 동작).
-        _register_prog_id(
-            open_command=f'{packnine_cmd} open "%1"',
-            icon_reference=_resolve_icon_reference(),
-        )
+        open_command = f'{packnine_cmd} open "%1"'
+        _register_prog_id(open_command=open_command, icon_reference=icon)
+        # "연결 프로그램" 목록/“다른 앱 선택” 대화상자에 PackNine을 비파괴적으로 노출.
+        _register_open_with(open_command=open_command, icon_reference=icon)
         for ext in _ARCHIVE_EXTENSIONS:
             _backup_and_set_default(ext)
     except OSError as exc:
@@ -333,6 +386,7 @@ def unregister() -> None:
             _delete_menu_key(rf"Software\Classes\{ext}", _OPEN_VERB)
             _delete_menu_key(base, _LEGACY_EXTRACT_VERB)
             _restore_default(ext)
+        _unregister_open_with()
         _unregister_prog_id()
     except OSError as exc:
         raise RuntimeError(f"레지스트리 해제(삭제)에 실패했습니다. (원인: {exc})") from exc

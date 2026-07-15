@@ -17,11 +17,13 @@ import sys
 import tempfile
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QFrame,
     QInputDialog,
+    QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -37,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from packnine.application.compress_service import CompressService
+from packnine.application.context_menu_service import ContextMenuService
 from packnine.application.extract_service import ExtractService
 from packnine.application.inspect_service import InspectService
 from packnine.application.update_service import UpdateService
@@ -169,6 +172,10 @@ class MainWindow(QMainWindow):
         # 더블클릭 "기본 프로그램으로 열기"용 임시 폴더들. 외부 프로그램이 파일을 읽는
         # 동안에는 지울 수 없으므로 모아두었다가 창을 닫을 때 일괄 정리한다.
         self._open_temp_dirs: list[pathlib.Path] = []
+        # 좌측 미리보기 상태: 현재 미리보기 원본 픽스맵/엔트리명/임시 폴더.
+        self._preview_pixmap: QPixmap | None = None
+        self._preview_entry_name: str | None = None
+        self._preview_temp_dir: pathlib.Path | None = None
 
         self._build_central()
         self._build_toolbar()
@@ -184,10 +191,19 @@ class MainWindow(QMainWindow):
         self._address_bar.setReadOnly(True)
         self._address_bar.setPlaceholderText("열린 아카이브 없음")
 
-        # 좌측: 아카이브 내부 폴더 트리
+        # 좌측 상단: 아카이브 내부 폴더 트리
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.itemClicked.connect(self._on_tree_item_clicked)
+
+        # 좌측 하단: 이미지 미리보기 패널
+        preview_panel = self._build_preview_panel()
+
+        # 좌측 열: 트리(위) + 미리보기(아래)를 세로 스플리터로 쌓는다.
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_splitter.addWidget(self._tree)
+        left_splitter.addWidget(preview_panel)
+        left_splitter.setSizes([340, 260])
 
         # 우측: 현재 폴더의 파일 목록
         self._table = QTableWidget(0, len(_TABLE_HEADERS))
@@ -195,14 +211,14 @@ class MainWindow(QMainWindow):
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.cellDoubleClicked.connect(self._on_table_double_clicked)
-        self._table.itemSelectionChanged.connect(self._update_status_bar)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
         self._table.setColumnWidth(0, 320)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._tree)
+        splitter.addWidget(left_splitter)
         splitter.addWidget(self._table)
-        # 반디집처럼 좌측 트리는 좁게, 우측 목록을 넓게 시작한다.
-        splitter.setSizes([220, 740])
+        # 반디집처럼 좌측은 좁게, 우측 목록을 넓게 시작한다.
+        splitter.setSizes([240, 720])
         splitter.setStretchFactor(1, 1)
 
         container = QWidget()
@@ -212,6 +228,30 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._address_bar)
         layout.addWidget(splitter)
         self.setCentralWidget(container)
+
+    def _build_preview_panel(self) -> QWidget:
+        """좌측 하단 이미지 미리보기 패널을 만든다."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+
+        title = QLabel("미리보기")
+        title.setStyleSheet("font-weight: bold;")
+
+        self._preview_image_label = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self._preview_image_label.setWordWrap(True)
+        self._preview_image_label.setMinimumHeight(140)
+        self._preview_image_label.setFrameShape(QFrame.Shape.StyledPanel)
+        self._preview_image_label.setText("이미지를 선택하면 여기에 미리보기가 표시됩니다")
+
+        self._preview_caption = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self._preview_caption.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(self._preview_image_label, stretch=1)
+        layout.addWidget(self._preview_caption)
+        return panel
 
     def _std_icon(self, pixmap: QStyle.StandardPixmap) -> QIcon:
         return self.style().standardIcon(pixmap)
@@ -282,6 +322,10 @@ class MainWindow(QMainWindow):
         tool_menu = menu_bar.addMenu("도구(&T)")
         tool_menu.addAction(self.action_extract)
         tool_menu.addAction(self.action_test)
+        tool_menu.addSeparator()
+        self.action_file_association = QAction("파일 연결 설정(&A)...", self)
+        self.action_file_association.triggered.connect(self._on_file_association)
+        tool_menu.addAction(self.action_file_association)
 
         help_menu = menu_bar.addMenu("도움말(&H)")
         action_about = QAction("PackNine 정보(&A)", self)
@@ -371,6 +415,33 @@ class MainWindow(QMainWindow):
             progress.close()
             # 실제 위치에 결과물을 남기지 않는다는 요구사항에 따라 임시 폴더는 항상 삭제한다.
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _on_file_association(self) -> None:
+        """아카이브 확장자를 PackNine에 연결한다(연결 프로그램 목록 등록 + 안내).
+
+        Windows는 보안상 기본 앱을 프로그램이 몰래 바꾸지 못하게 막으므로(UserChoice),
+        PackNine을 "연결 프로그램" 목록에 등록한 뒤 Windows 기본 앱 설정을 열어 사용자가
+        직접 지정하도록 안내한다.
+        """
+        try:
+            ContextMenuService().register()
+        except Exception as exc:  # noqa: BLE001 - 등록 실패해도 안내는 이어간다
+            self._show_error(exc)
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "파일 연결 설정",
+            "PackNine을 압축 파일(zip/7z/rar 등)의 '연결 프로그램' 목록에 등록했습니다.\n\n"
+            "더블클릭으로 항상 PackNine이 열리게 하려면, Windows 보안 정책상 사용자가 한 번 "
+            "직접 기본 앱으로 지정해야 합니다.\n"
+            "지금 Windows '기본 앱' 설정을 열까요?\n\n"
+            "(설정 > 앱 > 기본 앱에서 압축 파일 형식을 PackNine으로 선택하거나, 압축 파일을 "
+            "우클릭 → '연결 프로그램' → PackNine을 고르면 됩니다.)",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            # Windows 기본 앱 설정 페이지를 연다(실패해도 안내는 이미 했으므로 무시).
+            QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))
 
     def _on_add_files(self) -> None:
         """열려 있는 아카이브에 파일을 추가한다."""
@@ -674,7 +745,13 @@ class MainWindow(QMainWindow):
         self._address_bar.setText(
             f"{archive_name}\\{folder_display}" if folder_display else archive_name
         )
+        # 폴더를 새로 채우면 선택이 사라지므로 미리보기도 비운다.
+        self._clear_preview()
         self._update_status_bar()
+
+    def _on_selection_changed(self) -> None:
+        self._update_status_bar()
+        self._update_preview()
 
     def _update_status_bar(self) -> None:
         if self._current_manifest is None:
@@ -685,6 +762,100 @@ class MainWindow(QMainWindow):
         if selected:
             message += f", {selected}개 선택"
         self.statusBar().showMessage(message)
+
+    # ------------------------------------------------------------------
+    # 좌측 이미지 미리보기
+    # ------------------------------------------------------------------
+    def _single_selected_file_entry(self) -> ArchiveEntry | None:
+        """정확히 파일 1개만 선택돼 있으면 그 엔트리를, 아니면 None을 반환한다."""
+        if self._current_manifest is None:
+            return None
+        rows = {index.row() for index in self._table.selectedIndexes()}
+        if len(rows) != 1:
+            return None
+        item = self._table.item(next(iter(rows)), 0)
+        if item is None or item.data(_ROLE_KIND) != "file":
+            return None
+        path = item.data(_ROLE_PATH)
+        return next((e for e in self._current_manifest.entries if e.name == path), None)
+
+    def _update_preview(self) -> None:
+        entry = self._single_selected_file_entry()
+        if entry is None or not is_image_name(entry.name):
+            self._clear_preview()
+            return
+        # 같은 항목을 다시 선택한 경우 재추출하지 않는다.
+        if entry.name == self._preview_entry_name:
+            return
+        self._show_image_preview(entry)
+
+    def _show_image_preview(self, entry: ArchiveEntry) -> None:
+        assert self._current_archive_path is not None
+        # 이전 미리보기 임시 파일을 정리하고 새 이미지를 임시 폴더로 꺼낸다.
+        self._cleanup_preview_temp()
+        temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="packnine_thumb_"))
+        try:
+            # 미리보기는 이미 아는 비밀번호로만 시도하고, 실패하면 조용히 비운다
+            # (매 선택마다 비밀번호 창을 띄우면 방해가 되기 때문).
+            self._extract_service.extract_entries(
+                self._current_archive_path,
+                [entry.name],
+                temp_dir,
+                password=self._current_password,
+            )
+        except Exception:  # noqa: BLE001 - 미리보기 실패가 앱을 방해하면 안 된다
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self._clear_preview()
+            return
+
+        self._preview_temp_dir = temp_dir
+        self._preview_entry_name = entry.name
+        image_path = temp_dir.joinpath(*pathlib.PurePosixPath(entry.name).parts)
+        self._preview_pixmap = QPixmap(str(image_path))
+        self._render_preview()
+
+    def _render_preview(self) -> None:
+        # resizeEvent가 위젯 생성(_build_central) 전에 불릴 수 있어 방어한다.
+        if not hasattr(self, "_preview_image_label"):
+            return
+        if self._preview_pixmap is None or self._preview_pixmap.isNull():
+            self._preview_image_label.setText("미리보기를 표시할 수 없습니다")
+            self._preview_image_label.setPixmap(QPixmap())
+            self._preview_caption.setText("")
+            return
+        # 라벨 크기에 맞춰 비율 유지 축소(라벨이 아직 작으면 최소 크기로 대체).
+        target = self._preview_image_label.size()
+        width = max(target.width() - 4, 64)
+        height = max(target.height() - 4, 64)
+        scaled = self._preview_pixmap.scaled(
+            width,
+            height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._preview_image_label.setPixmap(scaled)
+        name = pathlib.PurePosixPath(self._preview_entry_name or "").name
+        w = self._preview_pixmap.width()
+        h = self._preview_pixmap.height()
+        self._preview_caption.setText(f"{name}  ({w}×{h})")
+
+    def _clear_preview(self) -> None:
+        self._preview_pixmap = None
+        self._preview_entry_name = None
+        self._preview_image_label.setPixmap(QPixmap())
+        self._preview_image_label.setText("이미지를 선택하면 여기에 미리보기가 표시됩니다")
+        self._preview_caption.setText("")
+        self._cleanup_preview_temp()
+
+    def _cleanup_preview_temp(self) -> None:
+        if self._preview_temp_dir is not None:
+            shutil.rmtree(self._preview_temp_dir, ignore_errors=True)
+            self._preview_temp_dir = None
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 오버라이드 네이밍 컨벤션 유지
+        super().resizeEvent(event)
+        # 창 크기가 바뀌면 미리보기도 새 크기에 맞춰 다시 그린다.
+        self._render_preview()
 
     # ------------------------------------------------------------------
     # 더블클릭: 폴더 탐색 / 내장 이미지 뷰어 / 기본 프로그램으로 열기
@@ -740,6 +911,7 @@ class MainWindow(QMainWindow):
         for temp_dir in self._open_temp_dirs:
             shutil.rmtree(temp_dir, ignore_errors=True)
         self._open_temp_dirs.clear()
+        self._cleanup_preview_temp()
         super().closeEvent(event)
 
     def _open_image_viewer(self, clicked_entry_name: str) -> None:
