@@ -140,6 +140,30 @@ def test_smart_extract_multiple_archives_each_processed(tmp_path, capsys, monkey
     assert (tmp_path / src_dir.name / "a.txt").exists()
 
 
+def test_smart_extract_here_ignores_smart_wrapping(tmp_path, capsys, monkeypatch):
+    # "여기에 풀기": 최상위 항목이 여러 개라도 하위 폴더를 만들지 않고
+    # 아카이브와 같은 폴더에 내용물을 그대로 푼다(알아서 풀기와의 차이점).
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    a = tmp_path / "a.txt"
+    a.write_text("aaa", encoding="utf-8")
+    b = tmp_path / "b.txt"
+    b.write_text("bbb", encoding="utf-8")
+    archive_path = tmp_path / "loose.zip"
+    assert main(["compress", str(a), str(b), "-o", str(archive_path)]) == 0
+    a.unlink()
+    b.unlink()
+    capsys.readouterr()
+
+    exit_code = main(["smart-extract", "--here", str(archive_path)])
+
+    assert exit_code == 0
+    # 알아서 풀기라면 tmp_path/loose/ 폴더가 생겼겠지만, 여기에 풀기는 만들지 않는다.
+    assert not (tmp_path / "loose").exists()
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "aaa"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "bbb"
+
+
 def test_smart_extract_continues_after_one_failure(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 

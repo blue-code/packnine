@@ -88,6 +88,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="해제 기준 폴더(base_destination). 없으면 각 아카이브와 같은 폴더를 사용",
     )
+    smart_extract_parser.add_argument(
+        "--here",
+        action="store_true",
+        help="내용과 무관하게 기준 폴더에 바로 푼다(하위 폴더를 만들지 않음 - 여기에 풀기)",
+    )
 
     context_menu_parser = subparsers.add_parser(
         "register-context-menu", help="탐색기 우클릭 메뉴/파일 연결을 등록·해제한다(설치 프로그램이 호출)"
@@ -277,10 +282,19 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
         # --dest-dir이 없으면 각 아카이브와 같은 폴더를 base_destination으로 사용한다.
         base_destination = dest_dir if dest_dir is not None else archive_path.parent
 
-        def operation(on_progress, _archive_path=archive_path, _base=base_destination):
+        # --here("여기에 풀기")는 내용을 보지 않고 기준 폴더에 그대로 풀고,
+        # 기본값("알아서 풀기")은 smart_extract가 하위 폴더 생성 여부를 판단한다.
+        def _run_extract(_archive_path, _base, password, on_progress):
+            if args.here:
+                return service.extract(
+                    _archive_path, _base, password=password, on_progress=on_progress
+                )
             return service.smart_extract(
-                _archive_path, _base, password=args.password, on_progress=on_progress
+                _archive_path, _base, password=password, on_progress=on_progress
             )
+
+        def operation(on_progress, _archive_path=archive_path, _base=base_destination):
+            return _run_extract(_archive_path, _base, args.password, on_progress)
 
         if use_gui_progress:
             # 여러 아카이브를 순차 처리하되, 하나가 실패해도(에러 다이얼로그만 뜨고)
@@ -288,9 +302,7 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
             def operation_with_password(
                 on_progress, password, _archive_path=archive_path, _base=base_destination
             ):
-                return service.smart_extract(
-                    _archive_path, _base, password=password, on_progress=on_progress
-                )
+                return _run_extract(_archive_path, _base, password, on_progress)
 
             ok = quick_progress.run_extract_with_password_retry(
                 f"압축 해제 중: {archive_path.name}",

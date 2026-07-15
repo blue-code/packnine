@@ -4,20 +4,24 @@
 반디집의 "알아서 압축"/"알아서 압축풀기"처럼 다이얼로그 없이 바로 실행되도록
 smart-compress/smart-extract CLI 서브커맨드를 연결한다(목적지 경로는 CLI가 스스로 계산).
 
-- 범용 메뉴: 모든 파일 우클릭 시 "PackNine으로 압축하기" (Software\\Classes\\*\\shell)
-- 폴더 메뉴: 폴더 우클릭 시 "압축하기" + "각각 압축하기" (Directory\\shell).
-  '*'는 파일에만 적용되어 폴더에는 별도 등록이 필요하고, "각각 압축하기"는 파일 1개
-  선택 시에도 떠서 혼란스럽다는 피드백에 따라 폴더 전용으로 두었다(정적 레지스트리
-  verb는 선택 개수를 조건으로 표시/숨김할 수 없다 - 그러려면 COM 셸 확장이 필요).
-- 아카이브 전용 메뉴: .zip/.7z/.rar 등 우클릭 시 "PackNine으로 압축풀기"/"열기"
-  (SystemFileAssociations\\확장자\\shell). 확장자 키(.zip 등)의 shell에 넣으면
-  그 확장자에 ProgID(기본 프로그램)가 연결된 순간 탐색기가 무시한다 - 실제로 .zip
-  기본 앱이 탐색기(CompressedFolder UserChoice)인 환경에서 압축풀기 메뉴가 아예
-  안 보이는 문제가 있었다. SystemFileAssociations의 verb는 기본 프로그램과 무관하게
-  항상 병합 표시된다(반디집과 같은 방식).
-- 압축/해제 메뉴는 서로 다른 verb 키 이름(PackNineCompress/PackNineExtract)을 쓴다.
-  같은 이름을 쓰면 탐색기가 양쪽에 등록된 동일 이름의 verb를 병합하면서 하나만
-  표시해 버리는 문제가 있었다 - 실제로 이 버그가 발견되어 이름을 분리해 고쳤다.
+모든 항목은 "PackNine"이라는 캐스케이드(SubCommands 하위 메뉴) 하나로 묶는다.
+개별 verb로 등록하면 탐색기가 출처('*', SystemFileAssociations, Directory)별로 항목을
+메뉴 곳곳에 흩어 배치해 PackNine 메뉴가 여러 군데 나뉘어 보인다는 피드백이 있었다.
+
+- 파일('*') 캐스케이드: [압축하기]
+- 폴더(Directory) 캐스케이드: [압축하기, 각각 압축하기] - "각각 압축하기"는 파일 1개
+  선택 시에도 떠서 혼란스럽다는 피드백에 따라 폴더 전용이다(정적 레지스트리 메뉴는
+  선택 개수를 조건으로 표시/숨김할 수 없다 - 그러려면 COM 셸 확장이 필요).
+- 아카이브(SystemFileAssociations\\확장자) 캐스케이드:
+  [알아서 풀기, 여기에 풀기, 열기, 압축하기]
+  - 확장자 키(.zip 등)의 shell에 넣으면 그 확장자에 ProgID(기본 프로그램)가 연결된
+    순간 탐색기가 무시한다 - 실제로 .zip 기본 앱이 탐색기(CompressedFolder UserChoice)인
+    환경에서 압축풀기 메뉴가 아예 안 보이는 문제가 있었다. SystemFileAssociations의
+    verb는 기본 프로그램과 무관하게 항상 병합 표시된다(반디집과 같은 방식).
+  - '*'와 같은 캐스케이드 verb 이름("PackNine")을 쓰므로, 아카이브 파일에서는 더
+    구체적인 SystemFileAssociations 쪽이 우선되어 캐스케이드가 하나만 보인다
+    (같은 이름 verb는 탐색기가 병합해 하나만 표시하는 동작을 의도적으로 이용).
+- 하위 메뉴의 표시 순서는 서브 키 이름의 사전순이므로 01_, 02_ ... 접두어로 고정한다.
 - 두 메뉴 모두 MultiSelectModel=Player를 등록해, 여러 항목을 선택해도 명령이 한 번만
   실행되고 %*로 선택된 모든 경로를 한꺼번에 전달받는다.
 - 파일 연결: PackNine.Archive라는 ProgID를 만들어 아카이브 확장자의 더블클릭 기본 동작을
@@ -34,6 +38,16 @@ import pathlib
 import shutil
 import sys
 
+_CASCADE_VERB = "PackNine"
+
+# 캐스케이드 하위 항목 키 - 접두 숫자가 곧 표시 순서다(사전순 정렬).
+_SUB_EXTRACT_SMART = "01_extract_smart"
+_SUB_EXTRACT_HERE = "02_extract_here"
+_SUB_OPEN = "03_open"
+_SUB_COMPRESS = "04_compress"
+_SUB_COMPRESS_EACH = "05_compress_each"
+
+# v0.4.x 이하가 등록했던 평면 verb 이름들 - unregister 시 잔여물 정리에만 사용한다.
 _COMPRESS_VERB = "PackNineCompress"
 _COMPRESS_EACH_VERB = "PackNineCompressEach"
 _EXTRACT_VERB = "PackNineExtract"
@@ -87,23 +101,64 @@ def _resolve_icon_reference() -> str:
     return f'"{sys.executable}",0'
 
 
-def _create_menu_key(
-    parent_key_path: str, verb: str, command: str, label: str, multi_select: bool = False
-) -> None:
+def _delete_tree(root: int, key_path: str) -> None:
+    """key_path 하위 트리를 재귀적으로 삭제한다(winreg.DeleteKey는 자식이 있으면 실패).
+
+    캐스케이드는 shell 하위에 여러 서브 키를 갖는 다단 구조라 재귀 삭제가 필요하다.
+    """
     import winreg
 
-    key_path = f"{parent_key_path}\\shell\\{verb}"
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, label)
-        if multi_select:
-            # 이 값이 없으면 탐색기가 다중 선택 시 명령을 파일마다 개별 실행해
-            # 별도 zip이 여러 개 생긴다. "Player"로 지정해야 %*에 선택된 모든
-            # 경로가 한 번에 전달되어 하나의 명령으로 처리된다.
-            winreg.SetValueEx(key, "MultiSelectModel", 0, winreg.REG_SZ, "Player")
+    try:
+        with winreg.OpenKey(root, key_path) as key:
+            while True:
+                try:
+                    child = winreg.EnumKey(key, 0)
+                except OSError:
+                    break  # 더 이상 자식이 없음
+                _delete_tree(root, f"{key_path}\\{child}")
+    except FileNotFoundError:
+        return
+    try:
+        winreg.DeleteKey(root, key_path)
+    except (FileNotFoundError, OSError):
+        pass
 
-    command_key_path = f"{key_path}\\command"
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, command_key_path) as key:
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
+
+def _create_cascade(
+    parent_key_path: str,
+    children: list[tuple[str, str, str, bool]],
+    icon_reference: str,
+) -> None:
+    """parent 아래에 "PackNine" 캐스케이드 메뉴와 하위 항목들을 등록한다.
+
+    children: (서브키 이름, 표시 레이블, 실행 명령, 다중 선택 여부) 목록.
+    """
+    import winreg
+
+    cascade_path = f"{parent_key_path}\\shell\\{_CASCADE_VERB}"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, cascade_path) as key:
+        winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, "PackNine")
+        # SubCommands가 빈 문자열이면 탐색기가 이 키의 shell 하위를 하위 메뉴로 그린다.
+        winreg.SetValueEx(key, "SubCommands", 0, winreg.REG_SZ, "")
+        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, icon_reference)
+
+    for sub_key, label, command, multi_select in children:
+        item_path = f"{cascade_path}\\shell\\{sub_key}"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, item_path) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, label)
+            if multi_select:
+                # 이 값이 없으면 탐색기가 다중 선택 시 명령을 파일마다 개별 실행해
+                # 별도 zip이 여러 개 생긴다. "Player"로 지정해야 %*에 선택된 모든
+                # 경로가 한 번에 전달되어 하나의 명령으로 처리된다.
+                winreg.SetValueEx(key, "MultiSelectModel", 0, winreg.REG_SZ, "Player")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"{item_path}\\command") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
+
+
+def _delete_cascade(parent_key_path: str) -> None:
+    import winreg
+
+    _delete_tree(winreg.HKEY_CURRENT_USER, f"{parent_key_path}\\shell\\{_CASCADE_VERB}")
 
 
 def _delete_menu_key(parent_key_path: str, verb: str) -> None:
@@ -215,51 +270,48 @@ def register() -> None:
 
     try:
         packnine_cmd = _resolve_packnine_command()
+        icon_reference = _resolve_icon_reference()
 
         # smart-compress/smart-extract는 목적지 경로를 다이얼로그 없이 스스로 계산하므로
         # 명령에 "%1.zip" 같은 고정 목적지를 넘길 필요가 없다 - 그냥 선택된 경로들(%*)만 넘긴다.
-        _create_menu_key(
-            r"Software\Classes\*",
-            _COMPRESS_VERB,
-            f"{packnine_cmd} smart-compress %*",
-            "PackNine으로 압축하기",
-            multi_select=True,
+        compress_item = (
+            _SUB_COMPRESS, "압축하기", f"{packnine_cmd} smart-compress %*", True,
         )
-        # 폴더 우클릭: '*'는 파일에만 적용되므로 Directory에 별도 등록한다.
-        _create_menu_key(
-            r"Software\Classes\Directory",
-            _COMPRESS_VERB,
-            f"{packnine_cmd} smart-compress %*",
-            "PackNine으로 압축하기",
-            multi_select=True,
+        compress_each_item = (
+            _SUB_COMPRESS_EACH, "각각 압축하기", f"{packnine_cmd} smart-compress --each %*", True,
         )
-        # "각각 압축하기"(항목별 zip)는 폴더 전용 - 파일 1개 선택 시에도 떠서
-        # 혼란스럽다는 피드백에 따라 파일('*')에는 등록하지 않는다.
-        _create_menu_key(
+
+        # 파일: 압축하기만. 폴더: 압축하기 + 각각 압축하기('*'는 파일에만 적용되므로
+        # Directory에 별도 등록해야 폴더 우클릭에 메뉴가 나온다).
+        _create_cascade(r"Software\Classes\*", [compress_item], icon_reference)
+        _create_cascade(
             r"Software\Classes\Directory",
-            _COMPRESS_EACH_VERB,
-            f"{packnine_cmd} smart-compress --each %*",
-            "PackNine으로 각각 압축하기",
-            multi_select=True,
+            [compress_item, compress_each_item],
+            icon_reference,
         )
 
         for ext in _ARCHIVE_EXTENSIONS:
             # SystemFileAssociations: 기본 프로그램(UserChoice/ProgID)이 무엇이든
             # 항상 병합 표시되는 유일한 per-user 위치다(모듈 docstring 참고).
-            _create_menu_key(
+            _create_cascade(
                 rf"Software\Classes\SystemFileAssociations\{ext}",
-                _EXTRACT_VERB,
-                f"{packnine_cmd} smart-extract %*",
-                "PackNine으로 압축풀기",
-                multi_select=True,
-            )
-            # 더블클릭 기본 동작(파일 연결)과 별개로, 우클릭에서도 명시적으로
-            # "열기"를 제공한다(기본 프로그램이 다른 압축 프로그램인 경우 대비).
-            _create_menu_key(
-                rf"Software\Classes\SystemFileAssociations\{ext}",
-                _OPEN_VERB,
-                f'{packnine_cmd} open "%1"',
-                "PackNine으로 열기",
+                [
+                    (
+                        _SUB_EXTRACT_SMART,
+                        "알아서 풀기",
+                        f"{packnine_cmd} smart-extract %*",
+                        True,
+                    ),
+                    (
+                        _SUB_EXTRACT_HERE,
+                        "여기에 풀기",
+                        f"{packnine_cmd} smart-extract --here %*",
+                        True,
+                    ),
+                    (_SUB_OPEN, "열기", f'{packnine_cmd} open "%1"', False),
+                    compress_item,
+                ],
+                icon_reference,
             )
 
         # 파일 연결: 더블클릭하면 GUI로 열어 내용을 보여준다(압축풀기와는 별개의 동작).
@@ -281,15 +333,17 @@ def unregister() -> None:
     _require_windows()
 
     try:
+        _delete_cascade(r"Software\Classes\*")
+        _delete_cascade(r"Software\Classes\Directory")
+        # 과거 버전(v0.4.x 이하)이 등록했던 평면 verb도 함께 정리한다(업그레이드 잔여물 방지).
         _delete_menu_key(r"Software\Classes\*", _COMPRESS_VERB)
+        _delete_menu_key(r"Software\Classes\*", _COMPRESS_EACH_VERB)
         _delete_menu_key(r"Software\Classes\Directory", _COMPRESS_VERB)
         _delete_menu_key(r"Software\Classes\Directory", _COMPRESS_EACH_VERB)
-        # 과거 버전(v0.4.0 이하)이 등록했던 위치도 함께 정리한다(업그레이드 잔여물 방지).
-        _delete_menu_key(r"Software\Classes\*", _COMPRESS_EACH_VERB)
         for ext in _ARCHIVE_EXTENSIONS:
+            _delete_cascade(rf"Software\Classes\SystemFileAssociations\{ext}")
             _delete_menu_key(rf"Software\Classes\SystemFileAssociations\{ext}", _EXTRACT_VERB)
             _delete_menu_key(rf"Software\Classes\SystemFileAssociations\{ext}", _OPEN_VERB)
-            # 과거 버전이 확장자 키에 직접 등록했던 verb 정리
             _delete_menu_key(rf"Software\Classes\{ext}", _EXTRACT_VERB)
             _delete_menu_key(rf"Software\Classes\{ext}", _OPEN_VERB)
             _restore_default(ext)
