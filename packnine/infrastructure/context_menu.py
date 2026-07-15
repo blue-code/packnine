@@ -5,12 +5,19 @@
 smart-compress/smart-extract CLI 서브커맨드를 연결한다(목적지 경로는 CLI가 스스로 계산).
 
 - 범용 메뉴: 모든 파일 우클릭 시 "PackNine으로 압축하기" (Software\\Classes\\*\\shell)
-- 아카이브 전용 메뉴: .zip/.7z/.rar/.tar/.tgz 우클릭 시 "PackNine으로 압축풀기"
-  (해당 확장자 키의 shell)
-- 두 메뉴는 서로 다른 verb 키 이름(PackNineCompress/PackNineExtract)을 쓴다. 같은 이름을
-  쓰면 탐색기가 "*"와 특정 확장자 양쪽에 등록된 동일 이름의 verb를 병합하면서 하나만
-  표시해 버리는 문제가 있었다(범용 "압축하기"만 보이고 아카이브 전용 "압축풀기"는
-  가려짐) - 실제로 이 버그가 발견되어 이름을 분리해 고쳤다.
+- 폴더 메뉴: 폴더 우클릭 시 "압축하기" + "각각 압축하기" (Directory\\shell).
+  '*'는 파일에만 적용되어 폴더에는 별도 등록이 필요하고, "각각 압축하기"는 파일 1개
+  선택 시에도 떠서 혼란스럽다는 피드백에 따라 폴더 전용으로 두었다(정적 레지스트리
+  verb는 선택 개수를 조건으로 표시/숨김할 수 없다 - 그러려면 COM 셸 확장이 필요).
+- 아카이브 전용 메뉴: .zip/.7z/.rar 등 우클릭 시 "PackNine으로 압축풀기"/"열기"
+  (SystemFileAssociations\\확장자\\shell). 확장자 키(.zip 등)의 shell에 넣으면
+  그 확장자에 ProgID(기본 프로그램)가 연결된 순간 탐색기가 무시한다 - 실제로 .zip
+  기본 앱이 탐색기(CompressedFolder UserChoice)인 환경에서 압축풀기 메뉴가 아예
+  안 보이는 문제가 있었다. SystemFileAssociations의 verb는 기본 프로그램과 무관하게
+  항상 병합 표시된다(반디집과 같은 방식).
+- 압축/해제 메뉴는 서로 다른 verb 키 이름(PackNineCompress/PackNineExtract)을 쓴다.
+  같은 이름을 쓰면 탐색기가 양쪽에 등록된 동일 이름의 verb를 병합하면서 하나만
+  표시해 버리는 문제가 있었다 - 실제로 이 버그가 발견되어 이름을 분리해 고쳤다.
 - 두 메뉴 모두 MultiSelectModel=Player를 등록해, 여러 항목을 선택해도 명령이 한 번만
   실행되고 %*로 선택된 모든 경로를 한꺼번에 전달받는다.
 - 파일 연결: PackNine.Archive라는 ProgID를 만들어 아카이브 확장자의 더블클릭 기본 동작을
@@ -218,9 +225,18 @@ def register() -> None:
             "PackNine으로 압축하기",
             multi_select=True,
         )
-        # 반디집 "각각 압축하기": 다중 선택 시 하나로 묶지 않고 항목별 zip을 만든다.
+        # 폴더 우클릭: '*'는 파일에만 적용되므로 Directory에 별도 등록한다.
         _create_menu_key(
-            r"Software\Classes\*",
+            r"Software\Classes\Directory",
+            _COMPRESS_VERB,
+            f"{packnine_cmd} smart-compress %*",
+            "PackNine으로 압축하기",
+            multi_select=True,
+        )
+        # "각각 압축하기"(항목별 zip)는 폴더 전용 - 파일 1개 선택 시에도 떠서
+        # 혼란스럽다는 피드백에 따라 파일('*')에는 등록하지 않는다.
+        _create_menu_key(
+            r"Software\Classes\Directory",
             _COMPRESS_EACH_VERB,
             f"{packnine_cmd} smart-compress --each %*",
             "PackNine으로 각각 압축하기",
@@ -228,8 +244,10 @@ def register() -> None:
         )
 
         for ext in _ARCHIVE_EXTENSIONS:
+            # SystemFileAssociations: 기본 프로그램(UserChoice/ProgID)이 무엇이든
+            # 항상 병합 표시되는 유일한 per-user 위치다(모듈 docstring 참고).
             _create_menu_key(
-                rf"Software\Classes\{ext}",
+                rf"Software\Classes\SystemFileAssociations\{ext}",
                 _EXTRACT_VERB,
                 f"{packnine_cmd} smart-extract %*",
                 "PackNine으로 압축풀기",
@@ -238,7 +256,7 @@ def register() -> None:
             # 더블클릭 기본 동작(파일 연결)과 별개로, 우클릭에서도 명시적으로
             # "열기"를 제공한다(기본 프로그램이 다른 압축 프로그램인 경우 대비).
             _create_menu_key(
-                rf"Software\Classes\{ext}",
+                rf"Software\Classes\SystemFileAssociations\{ext}",
                 _OPEN_VERB,
                 f'{packnine_cmd} open "%1"',
                 "PackNine으로 열기",
@@ -264,8 +282,14 @@ def unregister() -> None:
 
     try:
         _delete_menu_key(r"Software\Classes\*", _COMPRESS_VERB)
+        _delete_menu_key(r"Software\Classes\Directory", _COMPRESS_VERB)
+        _delete_menu_key(r"Software\Classes\Directory", _COMPRESS_EACH_VERB)
+        # 과거 버전(v0.4.0 이하)이 등록했던 위치도 함께 정리한다(업그레이드 잔여물 방지).
         _delete_menu_key(r"Software\Classes\*", _COMPRESS_EACH_VERB)
         for ext in _ARCHIVE_EXTENSIONS:
+            _delete_menu_key(rf"Software\Classes\SystemFileAssociations\{ext}", _EXTRACT_VERB)
+            _delete_menu_key(rf"Software\Classes\SystemFileAssociations\{ext}", _OPEN_VERB)
+            # 과거 버전이 확장자 키에 직접 등록했던 verb 정리
             _delete_menu_key(rf"Software\Classes\{ext}", _EXTRACT_VERB)
             _delete_menu_key(rf"Software\Classes\{ext}", _OPEN_VERB)
             _restore_default(ext)

@@ -33,7 +33,12 @@ def _use_fake_extensions(monkeypatch):
     import winreg
 
     for ext in _FAKE_EXTENSIONS:
-        for sub in (rf"Software\Classes\{ext}\shell", rf"Software\Classes\{ext}"):
+        for sub in (
+            rf"Software\Classes\{ext}\shell",
+            rf"Software\Classes\{ext}",
+            rf"Software\Classes\SystemFileAssociations\{ext}\shell",
+            rf"Software\Classes\SystemFileAssociations\{ext}",
+        ):
             try:
                 winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
             except OSError:
@@ -74,7 +79,14 @@ def test_register_creates_distinct_menu_entries_for_wildcard_and_extension():
     context_menu.register()
 
     compress_cmd = _query_verb_command("*", context_menu._COMPRESS_VERB)
-    extract_cmd = _query_verb_command(_FAKE_EXTENSIONS[0], context_menu._EXTRACT_VERB)
+    # 압축풀기/열기는 확장자 키가 아니라 SystemFileAssociations에 있어야 한다.
+    # 확장자 키에 ProgID(기본 프로그램)가 연결되어 있으면 탐색기가 ext\shell의
+    # verb를 무시하는데(UserChoice가 다른 앱이면 더더욱), SystemFileAssociations의
+    # verb는 기본 프로그램과 무관하게 항상 병합 표시된다 - 실제로 .zip 기본 앱이
+    # 탐색기(CompressedFolder)인 환경에서 압축풀기 메뉴가 사라지는 문제가 있었다.
+    extract_cmd = _query_verb_command(
+        rf"SystemFileAssociations\{_FAKE_EXTENSIONS[0]}", context_menu._EXTRACT_VERB
+    )
 
     assert compress_cmd is not None and "smart-compress" in compress_cmd
     assert extract_cmd is not None and "smart-extract" in extract_cmd
@@ -82,23 +94,42 @@ def test_register_creates_distinct_menu_entries_for_wildcard_and_extension():
     context_menu.unregister()
 
     assert _query_verb_command("*", context_menu._COMPRESS_VERB) is None
-    assert _query_verb_command(_FAKE_EXTENSIONS[0], context_menu._EXTRACT_VERB) is None
+    assert (
+        _query_verb_command(
+            rf"SystemFileAssociations\{_FAKE_EXTENSIONS[0]}", context_menu._EXTRACT_VERB
+        )
+        is None
+    )
 
 
 def test_register_creates_open_and_compress_each_entries():
-    # 반디집 기본 메뉴 대응: 아카이브 "PackNine으로 열기", 전체 파일 "각각 압축하기".
+    # 아카이브 "PackNine으로 열기"는 SystemFileAssociations에, "각각 압축하기"는
+    # 파일 1개 선택 시 뜨는 혼란을 막기 위해 폴더(Directory) 전용으로 등록한다.
     context_menu.register()
 
-    open_cmd = _query_verb_command(_FAKE_EXTENSIONS[0], context_menu._OPEN_VERB)
-    each_cmd = _query_verb_command("*", context_menu._COMPRESS_EACH_VERB)
+    open_cmd = _query_verb_command(
+        rf"SystemFileAssociations\{_FAKE_EXTENSIONS[0]}", context_menu._OPEN_VERB
+    )
+    each_cmd = _query_verb_command("Directory", context_menu._COMPRESS_EACH_VERB)
+    dir_compress_cmd = _query_verb_command("Directory", context_menu._COMPRESS_VERB)
 
     assert open_cmd is not None and " open " in open_cmd
     assert each_cmd is not None and "--each" in each_cmd
+    # 폴더 우클릭에도 "압축하기"가 있어야 한다('*'는 파일에만 적용되므로 별도 등록).
+    assert dir_compress_cmd is not None and "smart-compress" in dir_compress_cmd
+    # 파일 전체('*')에는 각각 압축하기를 두지 않는다(단일 파일 선택 시 혼란 방지).
+    assert _query_verb_command("*", context_menu._COMPRESS_EACH_VERB) is None
 
     context_menu.unregister()
 
-    assert _query_verb_command(_FAKE_EXTENSIONS[0], context_menu._OPEN_VERB) is None
-    assert _query_verb_command("*", context_menu._COMPRESS_EACH_VERB) is None
+    assert (
+        _query_verb_command(
+            rf"SystemFileAssociations\{_FAKE_EXTENSIONS[0]}", context_menu._OPEN_VERB
+        )
+        is None
+    )
+    assert _query_verb_command("Directory", context_menu._COMPRESS_EACH_VERB) is None
+    assert _query_verb_command("Directory", context_menu._COMPRESS_VERB) is None
 
 
 def test_register_sets_file_association_to_packnine():
