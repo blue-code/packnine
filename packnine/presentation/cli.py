@@ -7,13 +7,55 @@
 from __future__ import annotations
 
 import argparse
+import datetime
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
+import traceback
 
 # 여러 아카이브를 한꺼번에 풀 때 결과를 보여주려 탐색기 창을 몇 개까지 열지 상한.
 # 이보다 많으면 창이 우수수 떠서 오히려 방해가 되므로 이 개수까지만 연다.
 _MAX_REVEAL_WINDOWS = 3
+
+
+def _log_dir() -> pathlib.Path:
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    return pathlib.Path(base) / "PackNine"
+
+
+def _log_debug(message: str) -> None:
+    """실행 기록/오류를 로그 파일에 남긴다(탐색기 우클릭처럼 콘솔이 없을 때 진단용).
+
+    windowed exe는 콘솔이 없어 오류가 나면 조용히 죽어버려 "아무 반응 없음"으로 보인다.
+    무엇을 인자로 받았고 어디서 실패했는지 파일에 남겨야 원인을 추적할 수 있다.
+    로깅 자체의 실패가 프로그램을 죽여서는 안 되므로 모든 예외를 삼킨다.
+    """
+    try:
+        log_dir = _log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_dir / "packnine-debug.log", "a", encoding="utf-8") as f:
+            f.write(f"{stamp} {message}\n")
+    except Exception:
+        pass
+
+
+def _show_message_box(title: str, message: str) -> None:
+    """콘솔이 없는(탐색기 우클릭) 실행에서 사용자에게 오류/안내를 보이게 띄운다.
+
+    조용히 죽는 것보다 무엇이든 보이는 게 낫다. 나머지 GUI와 동일하게 PySide6를 쓴다.
+    다이얼로그 표시 자체가 실패하더라도(예: 디스플레이 없음) 원래 오류 처리를 막지 않도록
+    모든 예외를 삼킨다.
+    """
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.critical(None, title, message)
+    except Exception:
+        pass
 
 from packnine.application import smart_naming
 from packnine.application.compress_service import CompressService
@@ -418,8 +460,33 @@ def _cmd_register_context_menu(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    console = _has_console()
+    _log_debug(f"실행 argv={sys.argv!r} console={console}")
+    try:
+        return _main_inner(argv, console)
+    except SystemExit as exc:
+        # argparse가 인자 해석에 실패하면 SystemExit(2)를 던지는데, 콘솔이 없으면
+        # usage 메시지가 아무데도 안 보이고 조용히 죽는다 - 원인을 알려준다.
+        if not console and exc.code not in (0, None):
+            _log_debug(f"argparse 실패 code={exc.code} argv={sys.argv!r}")
+            _show_message_box(
+                "PackNine",
+                "명령 인자를 해석하지 못했습니다.\n"
+                "탐색기에서 파일 경로가 제대로 전달되지 않았을 수 있습니다.\n\n"
+                f"받은 인자: {sys.argv!r}",
+            )
+        raise
+    except Exception as exc:  # noqa: BLE001 - windowed에서 조용히 죽지 않도록 최상위 방어
+        _log_debug(f"치명적 오류: {traceback.format_exc()}")
+        if not console:
+            _show_message_box("PackNine 오류", f"예기치 못한 오류가 발생했습니다:\n\n{exc}")
+        raise
+
+
+def _main_inner(argv: list[str] | None, console: bool) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    _log_debug(f"파싱됨 command={getattr(args, 'command', None)}")
 
     if args.command is None:
         # 디스플레이 없는 환경(CI 등)에서 CLI만 쓸 때 PySide6 임포트 비용/실패를
