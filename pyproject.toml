@@ -1,6 +1,6 @@
 [project]
 name = "packnine"
-version = "0.5.1"
+version = "0.5.2"
 description = "PackNine - 오리지널 Windows 압축/해제 데스크톱 프로그램 (ZIP/7Z/TAR/RAR)"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import argparse
-import os
 import pathlib
+import subprocess
 import sys
+
+# 여러 아카이브를 한꺼번에 풀 때 결과를 보여주려 탐색기 창을 몇 개까지 열지 상한.
+# 이보다 많으면 창이 우수수 떠서 오히려 방해가 되므로 이 개수까지만 연다.
+_MAX_REVEAL_WINDOWS = 3
 
 from packnine.application import smart_naming
 from packnine.application.compress_service import CompressService
@@ -269,19 +273,37 @@ def _cmd_smart_compress(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def _open_folder(path: pathlib.Path) -> None:
-    """해제 완료 후 결과 폴더를 탐색기 창으로 열어 사용자에게 시각적 피드백을 준다.
+def _reveal_in_explorer(target: pathlib.Path) -> None:
+    """해제된 항목을 탐색기에서 '선택된 상태'로 열어 어디에 풀렸는지 바로 보이게 한다.
 
-    콘솔 없는(탐색기 우클릭) 실행에서는 성공해도 아무것도 안 보여서 "반응이 없다"고
-    느껴지던 문제를 반디집처럼 결과 폴더를 여는 것으로 해소한다. 열기 실패는 치명적이
-    아니므로 조용히 넘어간다(비-Windows에는 os.startfile 자체가 없다).
+    콘솔 없는(탐색기 우클릭) 실행에서는 성공해도 아무것도 안 보여서 "반응이 없다"거나
+    "풀린 파일을 못 찾겠다"고 느껴지던 문제를 해소한다. 단순히 폴더만 열면 이미 열려
+    있던 폴더일 때 새 창이 안 떠 티가 안 나므로, explorer /select로 그 항목의 부모
+    폴더를 열고 항목을 선택 표시한다(반디집이 푼 폴더를 보여주는 것과 같은 취지).
+    실패는 치명적이 아니므로 조용히 넘어간다(비-Windows에는 explorer가 없다).
     """
     try:
-        path = pathlib.Path(path)
-        if path.exists():
-            os.startfile(str(path))  # noqa: S606 - Windows 전용, 폴더를 탐색기로 연다
-    except (OSError, AttributeError):
+        target = pathlib.Path(target)
+        if not target.exists():
+            return
+        # explorer.exe는 성공해도 0이 아닌 코드를 반환하므로 check=False가 필수다.
+        subprocess.run(["explorer", f"/select,{target}"], check=False)  # noqa: S603,S607
+    except (OSError, ValueError):
         pass
+
+
+def _extracted_top_item(destination: pathlib.Path, manifest) -> pathlib.Path:
+    """해제 결과에서 사용자에게 보여줄 대표 항목(최상위 항목 하나)의 경로를 고른다.
+
+    최상위가 여러 개면 아카이브명 하위 폴더 안의 항목을, 하나면 그 항목을 가리킨다.
+    실제 디스크에 존재하는 첫 항목을 반환하고, 없으면 destination 자체로 대체한다.
+    """
+    for entry in manifest.entries:
+        top = entry.name.replace("\\", "/").split("/", 1)[0]
+        candidate = destination / top
+        if candidate.exists():
+            return candidate
+    return destination
 
 
 def _resolve_extract_destination(
@@ -313,7 +335,7 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
         from packnine.presentation.gui import quick_progress
 
     had_failure = False
-    opened_folders: list[pathlib.Path] = []
+    reveal_targets: list[pathlib.Path] = []
     for archive_str in args.archives:
         archive_path = pathlib.Path(archive_str)
         # --dest-dir이 없으면 각 아카이브와 같은 폴더를 base_destination으로 사용한다.
@@ -334,8 +356,8 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
             captured: dict[str, pathlib.Path] = {}
 
             def operation_with_password(on_progress, password, _capture=captured):
-                destination, _ = _run_extract(password, on_progress)
-                _capture["destination"] = destination
+                destination, manifest = _run_extract(password, on_progress)
+                _capture["target"] = _extracted_top_item(destination, manifest)
 
             ok = quick_progress.run_extract_with_password_retry(
                 f"압축 해제 중: {archive_path.name}",
@@ -343,8 +365,8 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
                 archive_name=archive_path.name,
                 initial_password=args.password,
             )
-            if ok and "destination" in captured:
-                opened_folders.append(captured["destination"])
+            if ok and "target" in captured:
+                reveal_targets.append(captured["target"])
             elif not ok:
                 had_failure = True
             continue
@@ -369,13 +391,17 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
         else:
             print(f"성공: {archive_path} ({len(manifest.entries)}개 항목)")
 
-    # 여러 아카이브가 같은 폴더로 풀린 경우 창이 중복으로 뜨지 않도록 중복을 제거해 연다.
+    # 여러 아카이브를 풀었어도 탐색기 창이 우수수 뜨지 않도록, 중복을 제거하고
+    # 최대 몇 개까지만 열어 보여준다(너무 많으면 오히려 방해가 된다).
     seen: set[str] = set()
-    for folder in opened_folders:
-        key = str(folder)
+    unique_targets: list[pathlib.Path] = []
+    for target in reveal_targets:
+        key = str(target)
         if key not in seen:
             seen.add(key)
-            _open_folder(folder)
+            unique_targets.append(target)
+    for target in unique_targets[:_MAX_REVEAL_WINDOWS]:
+        _reveal_in_explorer(target)
 
     return 1 if had_failure else 0
 

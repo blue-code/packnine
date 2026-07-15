@@ -34,8 +34,17 @@ def read_zone_identifier(source_path: pathlib.Path) -> bytes | None:
         return None
 
 
-def propagate_zone_identifier(source_archive: pathlib.Path, extracted_root: pathlib.Path) -> None:
-    """source_archive의 Zone.Identifier를 extracted_root 아래 모든 파일에 복사한다.
+def propagate_zone_identifier(
+    source_archive: pathlib.Path,
+    extracted_root: pathlib.Path,
+    extracted_names: list[str],
+) -> None:
+    """source_archive의 Zone.Identifier를 이번에 해제된 파일들에만 복사한다.
+
+    extracted_names는 아카이브 내부 경로(posix 구분자 '/') 목록이며, 이 목록에 있는
+    파일만 대상으로 한다. 과거에는 extracted_root를 통째로 rglob해서, 다운로드 폴더처럼
+    기존 파일이 많은 곳에 풀면 원래 있던 파일까지 전부 ADS를 써 수정 날짜가 바뀌고
+    인터넷 출처로 잘못 표시되는 심각한 버그가 있었다 - 반드시 해제된 파일만 건드린다.
 
     FAT32처럼 ADS를 지원하지 않는 파일시스템이거나 권한 문제가 있으면 파일 단위로 조용히
     건너뛴다 - MoTW 전파 실패가 압축 해제 자체를 실패시켜서는 안 되기 때문이다.
@@ -47,7 +56,10 @@ def propagate_zone_identifier(source_archive: pathlib.Path, extracted_root: path
     if zone_data is None:
         return
 
-    for file_path in pathlib.Path(extracted_root).rglob("*"):
+    root = pathlib.Path(extracted_root)
+    for name in extracted_names:
+        # 아카이브 내부 경로('a/b.txt')를 목적지 기준 실제 경로로 변환한다.
+        file_path = root.joinpath(*pathlib.PurePosixPath(name).parts)
         if not file_path.is_file():
             continue
         try:

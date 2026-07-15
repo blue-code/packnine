@@ -47,10 +47,12 @@ class ExtractService:
         finally:
             reader.close()
 
-        # 원본 아카이브가 웹에서 받은 파일이라면(Zone.Identifier 존재) 해제된 모든
-        # 파일에도 동일한 MoTW 표시를 남겨, 실행 시 SmartScreen 등 보호 기제가 그대로
+        # 원본 아카이브가 웹에서 받은 파일이라면(Zone.Identifier 존재) 이번에 해제된
+        # 파일들에만 동일한 MoTW 표시를 남겨, 실행 시 SmartScreen 등 보호 기제가 그대로
         # 작동하도록 한다(비-Windows/ADS 미지원 환경에서는 조용히 아무 일도 하지 않음).
-        motw.propagate_zone_identifier(archive_path, destination)
+        # 목적지에 원래 있던 파일은 절대 건드리지 않도록 해제된 파일 목록만 넘긴다.
+        extracted_names = [entry.name for entry in manifest.entries if not entry.is_dir]
+        motw.propagate_zone_identifier(archive_path, destination, extracted_names)
 
         return manifest
 
