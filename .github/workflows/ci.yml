@@ -86,6 +86,19 @@ jobs:
           "$APP_BIN" extract "$WORKDIR/sample.zip" -d "$WORKDIR/out"
           diff "$WORKDIR/src/sample.txt" "$WORKDIR/out/sample.txt"
 
+          # Windows 전용 기능(winreg 기반 우클릭 메뉴)이 macOS에서 트레이스백 없이
+          # "지원하지 않음" 오류로 안전하게 종료되는지 확인한다(크래시 방지 확인).
+          set +e
+          REGISTER_OUTPUT=$("$APP_BIN" register-context-menu 2>&1)
+          REGISTER_EXIT=$?
+          set -e
+          echo "$REGISTER_OUTPUT"
+          if [ "$REGISTER_EXIT" -ne 1 ]; then
+            echo "register-context-menu 종료 코드가 1이 아님: $REGISTER_EXIT" >&2
+            exit 1
+          fi
+          echo "$REGISTER_OUTPUT" | grep -q "Windows 전용"
+
       - name: 배포용 zip 패키징 (ditto, 확장 속성/리소스 포크 보존)
         run: ditto -c -k --sequesterRsrc --keepParent dist/PackNine.app PackNine-macOS-arm64.zip
 
