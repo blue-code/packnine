@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12"]
     steps:
       - name: 저장소 체크아웃
@@ -45,6 +45,12 @@ jobs:
 
       - name: 테스트 실행 (Windows)
         if: runner.os == 'Windows'
+        run: pytest
+
+      - name: 테스트 실행 (macOS, PySide6는 headless로 실행)
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: pytest
 
   pip-audit:

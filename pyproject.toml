@@ -34,7 +34,7 @@ build-backend = "setuptools.build_meta"
 include = ["packnine*"]
 
 [tool.setuptools.package-data]
-packnine = ["presentation/gui/assets/*.ico", "presentation/gui/assets/*.png"]
+packnine = ["presentation/gui/assets/*.ico", "presentation/gui/assets/*.icns", "presentation/gui/assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

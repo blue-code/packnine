@@ -63,6 +63,20 @@ https://github.com/blue-code/packnine/releases
 내려받아 원하는 위치에서 실행하면 됩니다. 우클릭 메뉴를 쓰려면
 `PackNine.exe register-context-menu`를 한 번 실행해주세요.
 
+### macOS (베타, Apple Silicon 전용)
+
+GitHub Release에서 `PackNine-macOS-arm64.zip`을 내려받아 압축을 풀면 `PackNine.app`이
+나옵니다. Apple Silicon(M1 이상, macOS 11 이상)만 지원하며, 아직 Apple 개발자 서명이
+적용되지 않아 최초 실행 시 Gatekeeper가 "확인되지 않은 개발자" 경고를 띄웁니다.
+
+1. `PackNine.app`을 더블클릭했을 때 경고가 뜨면 **시스템 설정 > 개인정보 보호 및 보안**으로
+   이동해 "PackNine을(를) 열기 위해 확인이 취소되었습니다" 항목 옆의 **[확인 없이 열기]**를
+   누릅니다.
+2. RAR 해제를 사용하려면 시스템에 `unrar` 또는 `bsdtar`가 필요합니다. 터미널에서
+   `brew install unrar` 또는 `brew install libarchive`로 설치하세요.
+3. 탐색기 우클릭 메뉴, MoTW(다운로드 표시) 전파 기능은 Windows 전용이며 macOS에서는
+   아직 지원하지 않습니다(GUI/CLI 압축·해제 기능은 Windows와 동일하게 동작합니다).
+
 ### 개발 환경으로 설치
 
 ```powershell

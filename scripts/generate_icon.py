@@ -1,8 +1,10 @@
-"""PackNine 앱 아이콘(.ico) 생성 스크립트.
+"""PackNine 앱 아이콘(.ico/.icns) 생성 스크립트.
 
 Pillow만으로 벡터 아트웍 없이 아이콘을 그린다. 실행 시
-packnine/presentation/gui/assets/ 아래에 icon.ico(다중 해상도)와
-icon_256.png(README/문서용 미리보기)를 생성한다.
+packnine/presentation/gui/assets/ 아래에 icon.ico(Windows, 다중 해상도),
+icon.icns(macOS, 다중 해상도)와 icon_256.png(README/문서용 미리보기)를 생성한다.
+Pillow의 ICNS 인코더는 순수 포맷 변환이라 macOS가 아닌 Windows에서도 생성 가능하다
+(iconutil 등 macOS 전용 도구 불필요).
 
 실행: .venv\\Scripts\\python.exe scripts\\generate_icon.py
 """
@@ -109,8 +111,12 @@ def generate() -> pathlib.Path:
     canvas.resize((256, 256), Image.LANCZOS).save(png_path)
 
     ico_path = ASSETS_DIR / "icon.ico"
-    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    canvas.save(ico_path, format="ICO", sizes=sizes)
+    ico_sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    canvas.save(ico_path, format="ICO", sizes=ico_sizes)
+
+    icns_path = ASSETS_DIR / "icon.icns"
+    icns_sizes = [(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)]
+    canvas.save(icns_path, format="ICNS", sizes=icns_sizes)
 
     return ico_path
 
