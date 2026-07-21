@@ -53,6 +53,49 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: pytest
 
+  build-macos:
+    name: macOS 앱 빌드 및 스모크 테스트 (arm64)
+    runs-on: macos-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치 (런타임 + PyInstaller)
+        run: pip install -e "." pyinstaller
+
+      - name: PyInstaller로 PackNine.app 빌드
+        run: pyinstaller packnine.mac.spec --noconfirm
+
+      - name: 빌드된 앱 스모크 테스트 (CLI 압축·해제 왕복)
+        run: |
+          set -e
+          APP_BIN="dist/PackNine.app/Contents/MacOS/PackNine"
+          "$APP_BIN" --help
+
+          WORKDIR="$RUNNER_TEMP/packnine-smoke"
+          mkdir -p "$WORKDIR/src" "$WORKDIR/out"
+          echo "hello packnine" > "$WORKDIR/src/sample.txt"
+
+          "$APP_BIN" compress "$WORKDIR/src/sample.txt" -o "$WORKDIR/sample.zip"
+          "$APP_BIN" list "$WORKDIR/sample.zip"
+          "$APP_BIN" extract "$WORKDIR/sample.zip" -d "$WORKDIR/out"
+          diff "$WORKDIR/src/sample.txt" "$WORKDIR/out/sample.txt"
+
+      - name: 배포용 zip 패키징 (ditto, 확장 속성/리소스 포크 보존)
+        run: ditto -c -k --sequesterRsrc --keepParent dist/PackNine.app PackNine-macOS-arm64.zip
+
+      - name: 빌드 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: PackNine-macOS-arm64
+          path: PackNine-macOS-arm64.zip
+          retention-days: 14
+
   pip-audit:
     name: 의존성 취약점 스캔 (pip-audit)
     runs-on: ubuntu-latest
