@@ -10,8 +10,8 @@ smart-compress/smart-extract CLI 서브커맨드를 연결한다(목적지 경�
 전달되지 않거나 메뉴가 아예 안 뜸) "알아서 풀기가 반응 없음" 문제를 일으켜 되돌렸다.
 평면 verb는 모든 탐색기 컨텍스트에서 %*로 파일 경로를 확실히 받아 실행된다.
 
-- 파일('*'): [압축하기]
-- 폴더(Directory): [압축하기, 각각 압축하기] - "각각 압축하기"는 파일 1개 선택 시에도
+- 파일('*'): [압축하기, 압축하기...(옵션 창)]
+- 폴더(Directory): [압축하기, 압축하기...(옵션 창), 각각 압축하기] - "각각 압축하기"는 파일 1개 선택 시에도
   떠서 혼란스럽다는 피드백에 따라 폴더 전용이다(정적 레지스트리 메뉴는 선택 개수를
   조건으로 표시/숨김할 수 없다 - 그러려면 COM 셸 확장이 필요).
 - 아카이브(SystemFileAssociations\\확장자): [알아서 풀기, 여기에 풀기, 열기]
@@ -47,6 +47,7 @@ except ImportError:  # 비-Windows(테스트 수집 시 등)에서는 사용되�
 # 평면 verb 이름들. 각 verb는 아이콘을 달아 시각적으로 PackNine 항목임을 구분한다.
 _COMPRESS_VERB = "PackNineCompress"
 _COMPRESS_EACH_VERB = "PackNineCompressEach"
+_COMPRESS_DIALOG_VERB = "PackNineCompressDialog"
 _EXTRACT_SMART_VERB = "PackNineExtractSmart"
 _EXTRACT_HERE_VERB = "PackNineExtractHere"
 _OPEN_VERB = "PackNineOpen"
@@ -332,6 +333,14 @@ def register() -> None:
             f'{packnine_cmd} smart-compress --each "%1"',
             "PackNine으로 각각 압축하기", icon,
         )
+        # 옵션 창을 띄우는 "PackNine으로 압축하기..." - 파일/폴더 양쪽에 등록한다.
+        # 말줄임표(...)는 "누르면 창이 뜬다"는 Windows 관례 표기다.
+        compress_dialog_cmd = f'{packnine_cmd} compress-dialog "%1"'
+        for parent in (r"Software\Classes\*", r"Software\Classes\Directory"):
+            _create_menu_key(
+                parent, _COMPRESS_DIALOG_VERB, compress_dialog_cmd,
+                "PackNine으로 압축하기...", icon,
+            )
 
         for ext in _ARCHIVE_EXTENSIONS:
             # SystemFileAssociations: 기본 프로그램(UserChoice/ProgID)이 무엇이든
@@ -372,6 +381,7 @@ def unregister() -> None:
         for parent in (r"Software\Classes\*", r"Software\Classes\Directory"):
             _delete_menu_key(parent, _COMPRESS_VERB)
             _delete_menu_key(parent, _COMPRESS_EACH_VERB)
+            _delete_menu_key(parent, _COMPRESS_DIALOG_VERB)
             # 과거(v0.5.0~0.5.2)의 캐스케이드 잔여물도 트리째 지운다.
             _delete_tree(_HKCU, f"{parent}\\shell\\{_LEGACY_CASCADE_VERB}")
 

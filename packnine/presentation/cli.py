@@ -125,6 +125,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="선택한 항목들을 하나로 묶지 않고 항목별로 각각 압축한다(각각 압축하기)",
     )
 
+    # 우클릭 "PackNine으로 압축하기..." - 즉시 압축(smart-compress)과 달리 옵션 창을 띄운다.
+    compress_dialog_parser = subparsers.add_parser(
+        "compress-dialog",
+        help="압축 옵션 창을 띄워 포맷/강도/비밀번호를 고른 뒤 압축한다(우클릭 메뉴용)",
+    )
+    compress_dialog_parser.add_argument("sources", nargs="+", help="압축할 파일/폴더 경로들")
+    compress_dialog_parser.add_argument(
+        "--no-collect",
+        action="store_true",
+        help="다중 선택 병합(대표 프로세스 대기)을 건너뛴다 - 단독 실행/테스트용",
+    )
+
     smart_extract_parser = subparsers.add_parser(
         "smart-extract", help="아카이브 내용에 맞춰 해제 위치를 자동으로 정한다(알아서 압축풀기)"
     )
@@ -308,6 +320,60 @@ def _cmd_smart_compress(args: argparse.Namespace) -> int:
         manifest = operation(None)
         print(f"압축 완료: {len(manifest.entries)}개 항목, 출력 경로: {destination}")
         return 0
+
+    from packnine.presentation.gui import quick_progress
+
+    ok = quick_progress.run_with_progress("압축 중...", operation)
+    return 0 if ok else 1
+
+
+def _cmd_compress_dialog(args: argparse.Namespace) -> int:
+    """압축 옵션 창을 띄워 사용자가 고른 값으로 압축한다(우클릭 "PackNine으로 압축하기...").
+
+    smart-compress가 "확인 없이 바로 zip"이라면 이쪽은 "포맷/압축 강도/비밀번호/출력
+    경로를 확인하고 압축"이다(반디집의 "반디집으로 압축하기"에 대응).
+
+    탐색기는 다중 선택 시 항목마다 프로세스를 하나씩 띄우므로(verb 명령이 "%1"),
+    그대로 두면 창이 선택 개수만큼 뜬다. selection_collector가 대표 프로세스 하나만
+    남기고 나머지 경로를 그 대표에게 합쳐준다.
+    """
+    from packnine.application import selection_collector
+
+    sources = [pathlib.Path(p) for p in args.sources]
+    if not args.no_collect:
+        collected = selection_collector.collect_selection([str(p) for p in sources])
+        if collected is None:
+            _log_debug("compress-dialog: 다른 인스턴스가 대표로 처리하므로 종료")
+            return 0
+        sources = [pathlib.Path(p) for p in collected]
+
+    from PySide6.QtWidgets import QApplication
+
+    from packnine.presentation.gui import compress_dialog as compress_dialog_module
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    # 출력 경로 기본값은 smart-compress와 같은 규칙으로 미리 계산해 채워둔다.
+    default_destination = smart_naming.resolve_smart_compress_destination(sources)
+    dialog = compress_dialog_module.CompressDialog(
+        initial_files=sources, initial_destination=default_destination
+    )
+    if dialog.exec() != compress_dialog_module.CompressDialog.DialogCode.Accepted:
+        return 0
+
+    source_paths, destination, password, compression_level = dialog.get_result()
+    service = CompressService()
+
+    def operation(on_progress):
+        return service.compress(
+            source_paths,
+            destination,
+            password=password,
+            compression_level=compression_level,
+            on_progress=on_progress,
+        )
 
     from packnine.presentation.gui import quick_progress
 
@@ -512,6 +578,8 @@ def _main_inner(argv: list[str] | None, console: bool) -> int:
             return _cmd_list(args)
         if args.command == "smart-compress":
             return _cmd_smart_compress(args)
+        if args.command == "compress-dialog":
+            return _cmd_compress_dialog(args)
         if args.command == "smart-extract":
             return _cmd_smart_extract(args)
         if args.command == "register-context-menu":

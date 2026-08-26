@@ -62,3 +62,32 @@ def test_password_mismatch_blocks_accept(qtbot, tmp_path, monkeypatch):
 
     assert warning_calls, "비밀번호 불일치 시 경고가 표시되어야 한다"
     assert dialog.result() != CompressDialog.DialogCode.Accepted
+
+
+def test_initial_destination_prefills_output_path_and_format(qtbot, tmp_path):
+    # 우클릭 "PackNine으로 압축하기..."는 목적지를 미리 계산해 넘긴다 - 사용자가 매번
+    # 출력 경로를 직접 타이핑하지 않아도 바로 확인만 하면 되게 한다.
+    initial_file = tmp_path / "a.txt"
+    initial_file.write_text("hello", encoding="utf-8")
+    destination = tmp_path / "a.7z"
+
+    dialog = CompressDialog(initial_files=[initial_file], initial_destination=destination)
+    qtbot.addWidget(dialog)
+
+    assert dialog._destination_edit.text() == str(destination)
+    # 확장자와 포맷 콤보가 어긋나면 _on_format_changed가 경로를 덮어써 혼란스럽다.
+    assert dialog._format_combo.currentText() == ".7z"
+
+    source_paths, result_destination, _, _ = dialog.get_result()
+    assert source_paths == [initial_file]
+    assert result_destination == destination
+
+
+def test_initial_destination_with_unknown_extension_keeps_path(qtbot, tmp_path):
+    # 콤보에 없는 확장자(.zipx 등)를 넘겨도 경로는 그대로 유지되어야 한다.
+    destination = tmp_path / "a.unknown"
+
+    dialog = CompressDialog(initial_destination=destination)
+    qtbot.addWidget(dialog)
+
+    assert dialog._destination_edit.text() == str(destination)

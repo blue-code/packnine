@@ -365,3 +365,124 @@ def test_compress_with_password(tmp_path, capsys):
     assert exit_code == 0
     output = capsys.readouterr().out
     assert "a.txt" in output
+
+
+class _FakeCompressDialog:
+    """CompressDialog 대역 - 실제 모달 창을 띄우지 않고 입력값을 흉내낸다."""
+
+    class DialogCode:
+        Accepted = 1
+        Rejected = 0
+
+    accepted = True
+    result: tuple | None = None
+    seen_files: list[pathlib.Path] | None = None
+    seen_destination: pathlib.Path | None = None
+
+    def __init__(self, initial_files=None, parent=None, initial_destination=None):
+        type(self).seen_files = initial_files
+        type(self).seen_destination = initial_destination
+
+    def exec(self):
+        return self.DialogCode.Accepted if type(self).accepted else self.DialogCode.Rejected
+
+    def get_result(self):
+        return type(self).result
+
+
+def _patch_compress_dialog(monkeypatch, *, accepted, result=None):
+    from packnine.presentation.gui import compress_dialog as dialog_module
+
+    _FakeCompressDialog.accepted = accepted
+    _FakeCompressDialog.result = result
+    _FakeCompressDialog.seen_files = None
+    _FakeCompressDialog.seen_destination = None
+    monkeypatch.setattr(dialog_module, "CompressDialog", _FakeCompressDialog)
+    return _FakeCompressDialog
+
+
+def test_compress_dialog_command_prefills_sources_and_auto_destination(
+    qtbot, tmp_path, monkeypatch
+):
+    # 우클릭 "PackNine으로 압축하기..." 진입 경로: 선택 항목과 자동 계산된 목적지가
+    # 다이얼로그에 미리 채워져야 사용자가 확인만 하고 바로 압축할 수 있다.
+    from packnine.domain.value_objects import CompressionLevel
+
+    source = tmp_path / "a.txt"
+    source.write_text("hello " * 20, encoding="utf-8")
+    destination = tmp_path / "custom.zip"
+    fake = _patch_compress_dialog(
+        monkeypatch, accepted=True, result=([source], destination, None, CompressionLevel.NORMAL)
+    )
+
+    exit_code = main(["compress-dialog", "--no-collect", str(source)])
+
+    assert exit_code == 0
+    assert destination.exists()
+    assert fake.seen_files == [source]
+    # 자동 목적지는 smart-compress와 동일한 규칙(파일명.zip)을 따른다.
+    assert fake.seen_destination == tmp_path / "a.zip"
+
+
+def test_compress_dialog_command_cancel_creates_nothing(qtbot, tmp_path, monkeypatch):
+    source = tmp_path / "a.txt"
+    source.write_text("hello", encoding="utf-8")
+    _patch_compress_dialog(monkeypatch, accepted=False)
+
+    exit_code = main(["compress-dialog", "--no-collect", str(source)])
+
+    assert exit_code == 0
+    assert list(tmp_path.glob("*.zip")) == []
+
+
+def test_compress_dialog_command_exits_quietly_when_another_instance_leads(
+    qtbot, tmp_path, monkeypatch
+):
+    # 다중 선택 시 탐색기가 항목마다 프로세스를 띄운다. 대표가 아닌 프로세스는
+    # 다이얼로그를 만들지 않고 조용히 끝나야 창이 여러 개 뜨지 않는다.
+    from packnine.application import selection_collector
+    from packnine.presentation.gui import compress_dialog as dialog_module
+
+    source = tmp_path / "a.txt"
+    source.write_text("hello", encoding="utf-8")
+    monkeypatch.setattr(selection_collector, "collect_selection", lambda *a, **k: None)
+
+    created = []
+
+    class _ShouldNotBeCreated:
+        def __init__(self, *args, **kwargs):
+            created.append(args)
+
+    monkeypatch.setattr(dialog_module, "CompressDialog", _ShouldNotBeCreated)
+
+    exit_code = main(["compress-dialog", str(source)])
+
+    assert exit_code == 0
+    assert created == []
+
+
+def test_compress_dialog_command_uses_collected_paths(qtbot, tmp_path, monkeypatch):
+    # 대표 프로세스는 다른 프로세스가 남긴 경로까지 합쳐서 다이얼로그에 채운다.
+    from packnine.application import selection_collector
+    from packnine.domain.value_objects import CompressionLevel
+
+    first = tmp_path / "a.txt"
+    second = tmp_path / "b.txt"
+    for path in (first, second):
+        path.write_text("hello " * 20, encoding="utf-8")
+    destination = tmp_path / "merged.zip"
+
+    monkeypatch.setattr(
+        selection_collector, "collect_selection", lambda *a, **k: [str(first), str(second)]
+    )
+    fake = _patch_compress_dialog(
+        monkeypatch,
+        accepted=True,
+        result=([first, second], destination, None, CompressionLevel.NORMAL),
+    )
+
+    exit_code = main(["compress-dialog", str(first)])
+
+    assert exit_code == 0
+    assert fake.seen_files == [first, second]
+    assert destination.exists()

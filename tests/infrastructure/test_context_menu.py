@@ -81,6 +81,25 @@ class TestFlatVerbRegistration:
         context_menu.unregister()
         assert _verb_command("*", context_menu._COMPRESS_VERB) is None
 
+    def test_file_and_folder_get_compress_dialog_verb(self):
+        # "PackNine으로 압축하기..." - 옵션 창을 띄우는 메뉴. 즉시 압축(smart-compress)과
+        # 달리 compress-dialog 서브커맨드를 호출해야 한다.
+        context_menu.register()
+
+        for parent in ("*", "Directory"):
+            cmd = _verb_command(parent, context_menu._COMPRESS_DIALOG_VERB) or ""
+            assert "compress-dialog" in cmd and '"%1"' in cmd, parent
+            assert "%*" not in cmd, parent
+            assert _verb_has_icon(parent, context_menu._COMPRESS_DIALOG_VERB), parent
+            label = _query_value(
+                rf"Software\Classes\{parent}\shell\{context_menu._COMPRESS_DIALOG_VERB}"
+            )
+            assert label == "PackNine으로 압축하기...", parent
+
+        context_menu.unregister()
+        for parent in ("*", "Directory"):
+            assert _verb_command(parent, context_menu._COMPRESS_DIALOG_VERB) is None, parent
+
     def test_folder_gets_compress_and_compress_each(self):
         context_menu.register()
 

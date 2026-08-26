@@ -39,6 +39,7 @@ class CompressDialog(QDialog):
         self,
         initial_files: list[pathlib.Path] | None = None,
         parent=None,
+        initial_destination: pathlib.Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("압축하기")
@@ -103,6 +104,23 @@ class CompressDialog(QDialog):
         main_layout.addLayout(file_buttons_layout)
         main_layout.addLayout(form_layout)
         main_layout.addWidget(button_box)
+
+        if initial_destination is not None:
+            self._apply_initial_destination(initial_destination)
+
+    def _apply_initial_destination(self, destination: pathlib.Path) -> None:
+        """미리 계산된 출력 경로를 채워 넣는다(우클릭 "압축하기..." 진입 경로).
+
+        포맷 콤보를 먼저 맞춘 뒤 경로를 넣어야 한다 - 순서를 바꾸면 콤보 변경 시그널이
+        _on_format_changed를 태워 방금 넣은 경로의 확장자를 다시 덮어쓴다.
+        확장자는 ".tar.gz"처럼 두 단계인 것이 있으므로 긴 것부터 비교한다.
+        """
+        text = str(destination)
+        for ext in sorted(_FORMAT_EXTENSIONS, key=len, reverse=True):
+            if text.lower().endswith(ext):
+                self._format_combo.setCurrentText(ext)
+                break
+        self._destination_edit.setText(text)
 
     def _on_add_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(self, "압축할 파일 선택")

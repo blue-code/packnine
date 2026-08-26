@@ -69,7 +69,7 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCore} "PackNine 실행 파일을 설치합니다. (필수)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "바탕화면에 PackNine 바로가기를 만듭니다."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecContextMenu} "탐색기에서 파일을 우클릭해 바로 압축/압축해제할 수 있게 합니다."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecContextMenu} "탐색기에서 파일을 우클릭해 압축(옵션 창/즉시)·압축해제할 수 있게 합니다."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 ;--------------------------------

@@ -30,7 +30,8 @@ ZIP, 7Z, TAR 계열(GZ/BZ2/XZ) 압축·해제와 RAR 해제를 지원하며, 설
   바로 처리 (`smart-compress`/`smart-extract`)
 - **탐색기 우클릭 메뉴**: 설치 프로그램 또는 `packnine register-context-menu`로 등록하면
   "PackNine" 하위 메뉴 하나로 묶여 표시 (다중 선택 지원, 관리자 권한 불필요)
-  - 파일: 압축하기 / 폴더: 압축하기 · 각각 압축하기
+  - 파일: PackNine으로 압축하기...(옵션 창) · 압축하기(즉시)
+  - 폴더: PackNine으로 압축하기...(옵션 창) · 압축하기(즉시) · 각각 압축하기
   - 압축 파일: 알아서 풀기 · 여기에 풀기 · 열기 · 압축하기
 - **내장 이미지 뷰어**: 아카이브를 열고 이미지 파일을 더블클릭하면 바로 미리보기
   (이전/다음 탐색 지원)
@@ -118,6 +119,10 @@ packnine smart-compress file1.txt file2.txt
 
 # 각각 압축하기: 여러 항목을 하나로 묶지 않고 항목별 zip으로 압축
 packnine smart-compress --each file1.txt file2.txt
+
+# 압축 옵션 창 띄우기: 포맷/압축 강도/비밀번호/출력 경로를 고른 뒤 압축
+# (우클릭 "PackNine으로 압축하기..."가 호출하는 명령. --no-collect는 다중 선택 병합 생략)
+packnine compress-dialog --no-collect file1.txt file2.txt
 
 # 알아서 압축풀기: 아카이브 안에 루트 항목이 하나뿐이면 바로, 여러 개면 새 폴더에 풀기
 packnine smart-extract output.zip
