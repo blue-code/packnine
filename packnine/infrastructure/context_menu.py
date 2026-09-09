@@ -58,7 +58,9 @@ _LEGACY_EXTRACT_VERB = "PackNineExtract"
 _LEGACY_CASCADE_VERB = "PackNine"
 # .gz/.bz2/.xz는 tar.gz 같은 복합 확장자든 순수 단일 파일 압축이든
 # format_registry가 양쪽 모두 처리하므로(단일 파일 해제 지원 추가) 대상에 포함한다.
-_ARCHIVE_EXTENSIONS = (".zip", ".7z", ".rar", ".tar", ".tgz", ".gz", ".bz2", ".xz")
+# .001은 분할 압축 첫 볼륨(이름.zip.001/이름.7z.001) - 우클릭 "알아서 풀기"와 더블클릭 열기가
+# 되게 등록한다. .002 이후는 등록하지 않는다(첫 볼륨으로만 열 수 있다).
+_ARCHIVE_EXTENSIONS = (".zip", ".7z", ".rar", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".001")
 _PROG_ID = "PackNine.Archive"
 _ASSOC_BACKUP_KEY = r"Software\PackNine\PreviousFileAssociations"
 # "다른 앱 선택" 목록에 PackNine을 노출하기 위한 Applications 하위 키 이름.

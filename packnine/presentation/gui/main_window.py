@@ -66,6 +66,8 @@ _ARCHIVE_EXTENSIONS = (
     ".gz",
     ".bz2",
     ".xz",
+    # 분할 압축 첫 볼륨(.zip.001/.7z.001). 판별만 하고 실제 포맷 해석은 format_registry가 한다.
+    ".001",
 )
 
 _TABLE_HEADERS = ["이름", "크기", "압축크기", "압축률", "수정한 날짜"]
@@ -356,8 +358,8 @@ class MainWindow(QMainWindow):
         dialog = CompressDialog(parent=self)
         if dialog.exec() != CompressDialog.DialogCode.Accepted:
             return
-        source_paths, destination, password, compression_level = dialog.get_result()
-        self._run_compress(source_paths, destination, password, compression_level)
+        source_paths, destination, password, compression_level, volume_size = dialog.get_result()
+        self._run_compress(source_paths, destination, password, compression_level, volume_size)
 
     def _on_extract(self) -> None:
         if self._current_archive_path is None:
@@ -548,6 +550,7 @@ class MainWindow(QMainWindow):
         destination: pathlib.Path,
         password: str | None,
         compression_level,
+        volume_size=None,
     ) -> None:
         progress = self._make_progress_dialog("압축 중...")
         try:
@@ -556,6 +559,7 @@ class MainWindow(QMainWindow):
                 destination,
                 password=password,
                 compression_level=compression_level,
+                volume_size=volume_size,
                 on_progress=self._progress_callback(progress),
             )
         except UnsafeArchiveEntryError as exc:
@@ -563,10 +567,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._show_error(exc)
         else:
-            self._current_archive_path = destination
+            # 분할했으면 실제 파일은 destination이 아니라 첫 볼륨(.001)이다. 창이 여는 것도 그 파일이어야 한다.
+            actual_path = manifest.archive_path or destination
+            self._current_archive_path = actual_path
             self._current_password = password
             self._populate_table(manifest)
-            QMessageBox.information(self, "완료", f"압축이 완료되었습니다: {destination}")
+            if manifest.volume_count > 1:
+                message = (
+                    f"압축이 완료되었습니다: {actual_path}\n"
+                    f"볼륨 {manifest.volume_count}개로 나뉘었습니다. 풀 때는 .001 파일을 여세요."
+                )
+            else:
+                message = f"압축이 완료되었습니다: {actual_path}"
+            QMessageBox.information(self, "완료", message)
         finally:
             progress.close()
 
@@ -1004,8 +1017,8 @@ class MainWindow(QMainWindow):
 
         dialog = CompressDialog(initial_files=paths, parent=self)
         if dialog.exec() == CompressDialog.DialogCode.Accepted:
-            source_paths, destination, password, compression_level = dialog.get_result()
-            self._run_compress(source_paths, destination, password, compression_level)
+            source_paths, destination, password, compression_level, volume_size = dialog.get_result()
+            self._run_compress(source_paths, destination, password, compression_level, volume_size)
 
 
 def run_gui(initial_archive: pathlib.Path | None = None) -> int:

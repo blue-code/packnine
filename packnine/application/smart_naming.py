@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 from packnine.domain.entities import ArchiveManifest
 
@@ -96,5 +97,21 @@ def resolve_smart_extract_destination(
     if len(top_level_names) <= 1:
         return base_destination
 
-    candidate = base_destination / archive_path.stem
+    candidate = base_destination / _archive_base_name(archive_path)
     return _resolve_unique_dir_path(candidate)
+
+
+_VOLUME_SUFFIX_RE = re.compile(r"\.\d{3}$")
+
+
+def _archive_base_name(archive_path: pathlib.Path) -> str:
+    """아카이브 파일명에서 폴더 이름으로 쓸 부분을 뽑는다.
+
+    분할 첫 볼륨 `photos.7z.001`은 stem이 `photos.7z`라 폴더 이름이 지저분해지므로
+    볼륨 번호를 먼저 떼고 stem을 취해 `photos`가 되게 한다. 인프라 volume_io와 같은 규칙이지만
+    application 계층이 infrastructure를 import하지 않도록 정규식만 여기 따로 둔다.
+    """
+    name = archive_path.name
+    if _VOLUME_SUFFIX_RE.search(name):
+        name = name[:-4]
+    return pathlib.Path(name).stem

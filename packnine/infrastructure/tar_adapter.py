@@ -121,6 +121,10 @@ class TarArchiveWriter:
     ) -> None:
         # tar는 암호화를 지원하지 않으므로 password는 무시한다(레지스트리 시그니처 통일용).
         self._path = pathlib.Path(path)
+        # tar는 분할을 지원하지 않는다(레지스트리가 사전에 거부). zip/7z writer와 같은
+        # 결과 메타 속성을 두어 CompressService가 포맷을 구분하지 않고 읽을 수 있게 한다.
+        self.output_path = self._path
+        self.volume_count = 1
         open_kwargs = _resolve_write_open_kwargs(self._path, compression_level)
         self._tf = tarfile.open(self._path, **open_kwargs)
 

@@ -10,7 +10,7 @@ import pathlib
 from packnine.application import smart_naming
 from packnine.domain.entities import ArchiveManifest
 from packnine.domain.interfaces import ProgressCallback
-from packnine.domain.value_objects import CompressionLevel
+from packnine.domain.value_objects import CompressionLevel, VolumeSize
 from packnine.infrastructure import format_registry
 
 
@@ -24,8 +24,15 @@ class CompressService:
         *,
         password: str | None = None,
         compression_level: CompressionLevel = CompressionLevel.NORMAL,
+        volume_size: VolumeSize | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> ArchiveManifest:
+        """source_paths를 destination으로 압축하고 결과 목록을 돌려준다.
+
+        volume_size를 주면 `destination.001`, `.002` … 볼륨으로 나눠 쓴다. 결과가 볼륨
+        하나에 들어가면 `.001` 없이 destination 그대로 저장되므로, 실제 파일 경로는 반환된
+        manifest.archive_path로 확인해야 한다.
+        """
         destination = pathlib.Path(destination)
 
         # writer를 만들기(=대상 파일을 여는 시점) 전에 소스 존재 여부를 먼저 검증한다.
@@ -43,19 +50,28 @@ class CompressService:
         # RAR 확장자면 get_writer가 UnsupportedFormatError를 던지며,
         # 여기서는 그대로 전파시킨다(RAR 쓰기는 라이선스상 미지원).
         writer = format_registry.get_writer(
-            destination, password=password, compression_level=compression_level
+            destination,
+            password=password,
+            compression_level=compression_level,
+            volume_size=volume_size,
         )
         writer.add_files(list(source_paths), on_progress=on_progress)
         writer.close()
 
         # 호출자가 결과를 바로 요약할 수 있도록, 방금 만든 아카이브를 다시 열어 목록을 읽는다.
-        reader = format_registry.get_reader(destination, password=password)
+        # 분할했으면 첫 볼륨(.001)을 열어야 하므로 writer가 확정한 실제 경로를 쓴다.
+        reader = format_registry.get_reader(writer.output_path, password=password)
         try:
             entries = reader.list_entries()
         finally:
             reader.close()
 
-        return ArchiveManifest(entries=entries, format_name=destination.suffix)
+        return ArchiveManifest(
+            entries=entries,
+            format_name=destination.suffix,
+            archive_path=writer.output_path,
+            volume_count=writer.volume_count,
+        )
 
     def smart_compress(
         self,

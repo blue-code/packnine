@@ -109,3 +109,55 @@ class TestUnsupportedExtension:
         reader = format_registry.get_reader(path)
         assert reader.list_entries()[0].name == "single"
         reader.close()
+
+
+class TestVolumeArchives:
+    """분할 첫 볼륨(.zip.001/.7z.001)은 원래 포맷의 어댑터로 해석되어야 한다."""
+
+    @pytest.mark.parametrize(
+        "filename, expected_cls",
+        [("archive.zip.001", ZipArchiveReader), ("archive.7z.001", SevenZipArchiveReader)],
+    )
+    def test_first_volume_resolves_to_base_format_reader(
+        self, tmp_path: pathlib.Path, filename: str, expected_cls: type
+    ):
+        assert format_registry._READER_CLASSES[
+            format_registry._resolve_extension(tmp_path / filename)
+        ] is expected_cls
+
+    def test_second_volume_is_not_openable_directly(self, tmp_path: pathlib.Path):
+        # .002를 직접 열면 헤더가 없어 실패한다. 첫 볼륨을 열라는 안내가 나가야 한다.
+        with pytest.raises(UnsupportedFormatError):
+            format_registry.get_reader(tmp_path / "archive.zip.002")
+
+    def test_tar_volume_is_unsupported(self, tmp_path: pathlib.Path):
+        with pytest.raises(UnsupportedFormatError):
+            format_registry.get_reader(tmp_path / "archive.tar.gz.001")
+
+    @pytest.mark.parametrize("filename", ["archive.tar", "archive.tar.gz", "archive.tgz"])
+    def test_writer_rejects_volume_size_for_tar_family(self, tmp_path: pathlib.Path, filename: str):
+        from packnine.domain.value_objects import VolumeSize
+
+        with pytest.raises(UnsupportedFormatError):
+            format_registry.get_writer(tmp_path / filename, volume_size=VolumeSize.from_megabytes(1))
+
+    def test_writer_rejects_volume_named_destination(self, tmp_path: pathlib.Path):
+        # 출력 경로에 .001을 직접 쓰면 .001.001이 생기므로 거부한다.
+        with pytest.raises(UnsupportedFormatError):
+            format_registry.get_writer(tmp_path / "archive.zip.001")
+
+    @pytest.mark.parametrize(
+        "filename, expected_cls",
+        [("archive.zip", ZipArchiveWriter), ("archive.7z", SevenZipArchiveWriter)],
+    )
+    def test_writer_accepts_volume_size_for_zip_and_7z(
+        self, tmp_path: pathlib.Path, filename: str, expected_cls: type
+    ):
+        from packnine.domain.value_objects import VolumeSize
+
+        writer = format_registry.get_writer(
+            tmp_path / filename, volume_size=VolumeSize.from_megabytes(1)
+        )
+        assert isinstance(writer, expected_cls)
+        writer.add_files([])
+        writer.close()

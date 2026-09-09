@@ -144,3 +144,81 @@ def test_smart_compress_multiple_files_names_archive_after_common_parent(
     assert expected_destination.exists()
     file_entry_names = {e.name for e in manifest.entries if not e.is_dir}
     assert {"a.txt", "b.txt"} <= file_entry_names
+
+
+class TestSplitCompress:
+    def _incompressible_source(self, tmp_path: pathlib.Path) -> pathlib.Path:
+        import os
+
+        src = tmp_path / "blob"
+        src.mkdir()
+        (src / "data.bin").write_bytes(os.urandom(300_000))
+        return src
+
+    @pytest.mark.parametrize("suffix", [".zip", ".7z"])
+    def test_volume_size_splits_and_manifest_points_to_first_volume(
+        self, tmp_path: pathlib.Path, suffix: str
+    ) -> None:
+        from packnine.domain.value_objects import VolumeSize
+
+        src = self._incompressible_source(tmp_path)
+        destination = tmp_path / f"out{suffix}"
+
+        manifest = CompressService().compress(
+            [src], destination, volume_size=VolumeSize(bytes=100_000)
+        )
+
+        assert manifest.volume_count >= 3
+        assert manifest.archive_path == destination.with_name(f"out{suffix}.001")
+        assert manifest.format_name == suffix
+        assert not destination.exists()
+
+    def test_small_result_is_written_as_plain_archive(self, tmp_path: pathlib.Path) -> None:
+        from packnine.domain.value_objects import VolumeSize
+
+        src_dir = make_sample_source_tree(tmp_path)
+        destination = tmp_path / "out.zip"
+
+        manifest = CompressService().compress(
+            [src_dir], destination, volume_size=VolumeSize.from_megabytes(10)
+        )
+
+        assert manifest.volume_count == 1
+        assert manifest.archive_path == destination
+        assert destination.exists()
+
+    def test_without_volume_size_manifest_reports_single_volume(self, tmp_path: pathlib.Path) -> None:
+        src_dir = make_sample_source_tree(tmp_path)
+        destination = tmp_path / "out.zip"
+
+        manifest = CompressService().compress([src_dir], destination)
+
+        assert manifest.volume_count == 1
+        assert manifest.archive_path == destination
+
+    def test_tar_with_volume_size_is_rejected_before_writing(self, tmp_path: pathlib.Path) -> None:
+        from packnine.domain.value_objects import VolumeSize
+
+        src_dir = make_sample_source_tree(tmp_path)
+        destination = tmp_path / "out.tar.gz"
+
+        with pytest.raises(UnsupportedFormatError):
+            CompressService().compress(
+                [src_dir], destination, volume_size=VolumeSize.from_megabytes(1)
+            )
+        assert not destination.exists()
+
+    def test_split_archive_extracts_from_first_volume(self, tmp_path: pathlib.Path) -> None:
+        from packnine.application.extract_service import ExtractService
+        from packnine.domain.value_objects import VolumeSize
+        from tests.infrastructure.conftest import assert_tree_equal
+
+        src = self._incompressible_source(tmp_path)
+        manifest = CompressService().compress(
+            [src], tmp_path / "out.7z", volume_size=VolumeSize(bytes=100_000)
+        )
+
+        dest = tmp_path / "extracted"
+        ExtractService().extract(manifest.archive_path, dest)
+
+        assert_tree_equal(src, dest / "blob")

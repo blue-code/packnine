@@ -17,7 +17,8 @@ from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import CorruptedArchiveError, InvalidPasswordError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
-from packnine.domain.value_objects import CompressionLevel
+from packnine.domain.value_objects import CompressionLevel, VolumeSize
+from packnine.infrastructure import volume_io
 
 
 @contextlib.contextmanager
@@ -47,8 +48,19 @@ class SevenZipArchiveReader:
     def __init__(self, path: pathlib.Path, password: str | None = None) -> None:
         self._path = pathlib.Path(path)
         self._password = password
-        with _map_py7zr_errors(self._path, password):
-            self._archive = py7zr.SevenZipFile(self._path, mode="r", password=password)
+        # 분할 첫 볼륨(.7z.001)이면 볼륨 묶음을 하나의 파일 객체로 열어 넘긴다.
+        # py7zr은 넘겨받은 파일 객체를 닫지 않으므로 close()에서 우리가 직접 닫는다.
+        self._volume_source = (
+            volume_io.open_volume_source(self._path) if volume_io.is_first_volume(self._path) else None
+        )
+        source = self._volume_source if self._volume_source is not None else self._path
+        try:
+            with _map_py7zr_errors(self._path, password):
+                self._archive = py7zr.SevenZipFile(source, mode="r", password=password)
+        except Exception:
+            if self._volume_source is not None:
+                self._volume_source.close()
+            raise
 
     def list_entries(self) -> list[ArchiveEntry]:
         entries: list[ArchiveEntry] = []
@@ -120,6 +132,8 @@ class SevenZipArchiveReader:
 
     def close(self) -> None:
         self._archive.close()
+        if self._volume_source is not None:
+            self._volume_source.close()
 
 
 class SevenZipArchiveWriter:
@@ -130,14 +144,22 @@ class SevenZipArchiveWriter:
         path: pathlib.Path,
         password: str | None = None,
         compression_level: CompressionLevel = CompressionLevel.NORMAL,
+        volume_size: VolumeSize | None = None,
     ) -> None:
         self._path = pathlib.Path(path)
         self._password = password
+        # 실제로 만들어진 첫 파일 경로와 볼륨 수(zip 어댑터와 같은 규칙).
+        self.output_path = self._path
+        self.volume_count = 1
+        self._volume_target = (
+            volume_io.open_volume_target(self._path, volume_size) if volume_size is not None else None
+        )
+        target = self._volume_target if self._volume_target is not None else self._path
         # 압축 레벨 세밀 조정은 py7zr filters로 가능하나, 요구사항에 필터 커스터마이징이
         # 명시되지 않아 최소 구현에서는 기본 LZMA2 필터를 그대로 사용한다.
         self._compression_level = compression_level
         self._archive = py7zr.SevenZipFile(
-            self._path,
+            target,
             mode="w",
             password=password,
             header_encryption=bool(password),
@@ -158,3 +180,6 @@ class SevenZipArchiveWriter:
 
     def close(self) -> None:
         self._archive.close()
+        if self._volume_target is not None:
+            self._volume_target.close()
+            self.output_path, self.volume_count = volume_io.finalize_volumes(self._path)

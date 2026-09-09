@@ -26,13 +26,18 @@ ZIP, 7Z, TAR 계열(GZ/BZ2/XZ) 압축·해제와 RAR 해제를 지원하며, 설
   WinZip AES 방식으로 반디집/7-Zip/WinRAR과 호환). 비밀번호가 틀리면 디스크에 쓰기 전에
   차단하고, GUI/우클릭 메뉴에서는 비밀번호 입력 다이얼로그로 재시도할 수 있음
 - **압축률 선택**: 저장/빠름/보통/최대 등 압축 레벨 선택
+- **분할 압축**: ZIP/7Z를 지정한 크기(MB)의 볼륨(`이름.7z.001`, `.002` …)으로 나눠 저장.
+  옵션 창에 네이버 메일(일반 10MB/대용량 2GB), 다음 메일(일반 25MB/대용량 4GB), Gmail(25MB)
+  첨부 한도 프리셋이 있고, 결과가 한 조각이면 `.001` 없이 일반 파일로 저장. 첫 볼륨(`.001`)을
+  열거나 우클릭 "알아서 풀기"로 해제 (zip 분할은 7-Zip 방식 `.zip.001`이라 반디집·7-Zip·
+  알집에서 열리며 Windows 탐색기 기본 풀기로는 열리지 않음)
 - **알아서 압축 / 알아서 압축풀기**: 목적지 경로·파일명을 다이얼로그 없이 자동으로 정해
   바로 처리 (`smart-compress`/`smart-extract`)
 - **탐색기 우클릭 메뉴**: 설치 프로그램 또는 `packnine register-context-menu`로 등록하면
   "PackNine" 하위 메뉴 하나로 묶여 표시 (다중 선택 지원, 관리자 권한 불필요)
-  - 파일: PackNine으로 압축하기...(옵션 창) · 압축하기(즉시)
+  - 파일: PackNine으로 압축하기...(옵션 창: 포맷·강도·비밀번호·분할) · 압축하기(즉시)
   - 폴더: PackNine으로 압축하기...(옵션 창) · 압축하기(즉시) · 각각 압축하기
-  - 압축 파일: 알아서 풀기 · 여기에 풀기 · 열기 · 압축하기
+  - 압축 파일(분할 첫 볼륨 `.001` 포함): 알아서 풀기 · 여기에 풀기 · 열기 · 압축하기
 - **내장 이미지 뷰어**: 아카이브를 열고 이미지 파일을 더블클릭하면 바로 미리보기
   (이전/다음 탐색 지원)
 - **GUI**: 드래그 앤 드롭, 파일 목록 테이블 뷰, 압축 다이얼로그, 진행률 표시
@@ -108,8 +113,14 @@ packnine compress file1.txt file2.txt folder -o output.zip
 packnine compress folder -o output.zip --password "안전한암호"
 packnine compress folder -o output.7z --password "안전한암호"
 
+# 분할 압축: 볼륨 하나를 25MB로 제한 (결과: big.7z.001, big.7z.002 ... / 한 조각이면 big.7z)
+packnine compress big_folder -o big.7z --volume-size 25
+
 # 해제
 packnine extract output.zip -d .\extracted
+
+# 분할 파일 해제: 첫 볼륨(.001)을 지정하면 나머지 볼륨은 같은 폴더에서 자동으로 찾는다
+packnine extract big.7z.001 -d .\extracted
 
 # RAR 해제 (시스템에 unrar 또는 bsdtar 필요)
 packnine extract archive.rar -d .\extracted
@@ -155,7 +166,7 @@ packnine register-context-menu --unregister
 packnine/
 ├── domain/                # 순수 비즈니스 로직, 외부 의존성 없음
 │   ├── entities.py        # ArchiveEntry, ArchiveManifest
-│   ├── value_objects.py   # ArchivePath, CompressionLevel, PasswordPolicy
+│   ├── value_objects.py   # ArchivePath, CompressionLevel, PasswordPolicy, VolumeSize/SPLIT_PRESETS
 │   ├── security_policy.py # ArchiveSecurityPolicy (Zip Slip/폭탄/심링크 방어)
 │   └── interfaces.py      # ArchiveReader/ArchiveWriter Protocol
 ├── application/           # 유스케이스 오케스트레이션
@@ -170,6 +181,7 @@ packnine/
 │   ├── tar_adapter.py
 │   ├── rar_adapter.py     # 해제 전용
 │   ├── format_registry.py
+│   ├── volume_io.py        # 분할 압축 볼륨(.001/.002 ...) 입출력
 │   ├── motw.py             # MoTW(Zone.Identifier) 전파
 │   └── context_menu.py     # 탐색기 우클릭 메뉴 등록/해제(winreg)
 ├── presentation/

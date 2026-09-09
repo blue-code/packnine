@@ -67,8 +67,9 @@ from packnine.domain.exceptions import (
     ExternalToolMissingError,
     InvalidPasswordError,
     UnsafeArchiveEntryError,
+    UnsupportedFormatError,
 )
-from packnine.domain.value_objects import CompressionLevel
+from packnine.domain.value_objects import CompressionLevel, VolumeSize
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -88,6 +89,13 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=range(0, 10),
         metavar="0-9",
         help="압축 강도 (0=저장, 9=최대)",
+    )
+    compress_parser.add_argument(
+        "--volume-size",
+        type=int,
+        default=None,
+        metavar="MB",
+        help="분할 압축: 볼륨 하나의 최대 크기(MB). ZIP/7Z만 지원하며 결과는 출력경로.001, .002 ...",
     )
 
     extract_parser = subparsers.add_parser("extract", help="아카이브를 해제한다")
@@ -181,17 +189,42 @@ def _compression_level_from_int(value: int) -> CompressionLevel:
     return CompressionLevel.MAXIMUM
 
 
+def _volume_size_from_args(args: argparse.Namespace) -> VolumeSize | None:
+    """--volume-size(MB)를 VolumeSize로 바꾼다. 0 이하면 ValueError가 그대로 올라온다.
+
+    SystemExit로 끝내지 않는다 - main()은 콘솔이 없을 때 SystemExit를 모달 메시지 박스로
+    바꾸므로, 값 검증 실패는 다른 입력 오류처럼 stderr 안내 + 종료 코드 1로 처리한다.
+    """
+    megabytes = getattr(args, "volume_size", None)
+    if megabytes is None:
+        return None
+    return VolumeSize.from_megabytes(megabytes)
+
+
+def _describe_output(manifest) -> str:
+    """압축 결과 메시지에 쓸 출력 경로 문구. 분할됐으면 볼륨 수를 함께 알린다."""
+    if manifest.volume_count > 1:
+        return f"{manifest.archive_path} 외 {manifest.volume_count - 1}개 볼륨"
+    return str(manifest.archive_path)
+
+
 def _cmd_compress(args: argparse.Namespace) -> int:
     service = CompressService()
     sources = [pathlib.Path(p) for p in args.sources]
     destination = pathlib.Path(args.output)
+    try:
+        volume_size = _volume_size_from_args(args)
+    except ValueError as exc:
+        print(f"오류: --volume-size 값이 올바르지 않습니다 - {exc}", file=sys.stderr)
+        return 1
     manifest = service.compress(
         sources,
         destination,
         password=args.password,
         compression_level=_compression_level_from_int(args.level),
+        volume_size=volume_size,
     )
-    print(f"압축 완료: {len(manifest.entries)}개 항목, 출력 경로: {destination}")
+    print(f"압축 완료: {len(manifest.entries)}개 항목, 출력 경로: {_describe_output(manifest)}")
     return 0
 
 
@@ -363,7 +396,7 @@ def _cmd_compress_dialog(args: argparse.Namespace) -> int:
     if dialog.exec() != compress_dialog_module.CompressDialog.DialogCode.Accepted:
         return 0
 
-    source_paths, destination, password, compression_level = dialog.get_result()
+    source_paths, destination, password, compression_level, volume_size = dialog.get_result()
     service = CompressService()
 
     def operation(on_progress):
@@ -372,6 +405,7 @@ def _cmd_compress_dialog(args: argparse.Namespace) -> int:
             destination,
             password=password,
             compression_level=compression_level,
+            volume_size=volume_size,
             on_progress=on_progress,
         )
 
@@ -598,6 +632,10 @@ def _main_inner(argv: list[str] | None, console: bool) -> int:
         return 1
     except ExternalToolMissingError as exc:
         print(f"오류: 필요한 외부 도구가 없습니다 - {exc}", file=sys.stderr)
+        return 1
+    except UnsupportedFormatError as exc:
+        # tar 계열에 --volume-size를 주거나 RAR로 쓰기를 요청한 경우 - 트레이스백 대신 안내한다.
+        print(f"오류: {exc}", file=sys.stderr)
         return 1
     except (FileNotFoundError, OSError) as exc:
         print(f"오류: {exc}", file=sys.stderr)

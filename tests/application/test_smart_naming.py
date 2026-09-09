@@ -185,3 +185,20 @@ def test_multiple_distinct_top_level_names_detected(
     )
 
     assert destination == base_destination / "archive"
+
+
+def test_split_first_volume_folder_name_drops_volume_number_and_extension(
+    tmp_path: pathlib.Path,
+) -> None:
+    # photos.7z.001을 알아서 풀면 폴더 이름이 "photos.7z"가 아니라 "photos"여야 한다.
+    manifest = ArchiveManifest(
+        entries=[_entry("a.txt"), _entry("b.txt")], format_name=".7z"
+    )
+    archive_path = tmp_path / "photos.7z.001"
+    base_destination = tmp_path / "extracted"
+
+    destination = smart_naming.resolve_smart_extract_destination(
+        manifest, archive_path, base_destination
+    )
+
+    assert destination == base_destination / "photos"

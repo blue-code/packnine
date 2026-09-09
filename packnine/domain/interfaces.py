@@ -37,7 +37,14 @@ class ArchiveReader(Protocol):
 
 @runtime_checkable
 class ArchiveWriter(Protocol):
-    """새 아카이브를 생성/추가하는 포트."""
+    """새 아카이브를 생성/추가하는 포트.
+
+    output_path/volume_count는 close() 이후에 확정된다. 분할 압축이면 첫 볼륨 경로와
+    볼륨 수가 들어가고, 분할하지 않았거나 결과가 한 조각이면 지정 경로와 1이다.
+    """
+
+    output_path: pathlib.Path
+    volume_count: int
 
     def add_files(
         self,

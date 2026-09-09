@@ -132,3 +132,68 @@ class TestSevenZipSecurityRegression:
 
         assert not dest.exists()
         assert not (tmp_path / "evil.txt").exists()
+
+
+class TestSevenZipVolumes:
+    def _make_incompressible_source(self, tmp_path: pathlib.Path) -> pathlib.Path:
+        import os
+
+        src = tmp_path / "blob"
+        src.mkdir()
+        (src / "data.bin").write_bytes(os.urandom(300_000))
+        return src
+
+    def test_split_round_trip_creates_three_digit_volumes(self, tmp_path: pathlib.Path):
+        from packnine.domain.value_objects import VolumeSize
+
+        src = self._make_incompressible_source(tmp_path)
+        archive_path = tmp_path / "out.7z"
+
+        writer = SevenZipArchiveWriter(archive_path, volume_size=VolumeSize(bytes=100_000))
+        writer.add_files([src])
+        writer.close()
+
+        assert not archive_path.exists()
+        volumes = sorted(p.name for p in tmp_path.glob("out.7z.*"))
+        assert volumes[:2] == ["out.7z.001", "out.7z.002"]
+        assert writer.output_path == archive_path.with_name("out.7z.001")
+        assert writer.volume_count == len(volumes)
+
+        reader = SevenZipArchiveReader(writer.output_path)
+        dest = tmp_path / "extracted"
+        reader.extract_all(dest)
+        reader.close()
+        assert_tree_equal(src, dest / "blob")
+
+    def test_single_volume_result_drops_001_suffix(self, tmp_path: pathlib.Path):
+        from packnine.domain.value_objects import VolumeSize
+
+        src = make_sample_source_tree(tmp_path)
+        archive_path = tmp_path / "out.7z"
+
+        writer = SevenZipArchiveWriter(archive_path, volume_size=VolumeSize.from_megabytes(10))
+        writer.add_files([src])
+        writer.close()
+
+        assert archive_path.exists()
+        assert list(tmp_path.glob("out.7z.*")) == []
+        assert writer.output_path == archive_path
+        assert writer.volume_count == 1
+
+    def test_split_with_password_round_trip(self, tmp_path: pathlib.Path):
+        from packnine.domain.value_objects import VolumeSize
+
+        src = self._make_incompressible_source(tmp_path)
+        archive_path = tmp_path / "secret.7z"
+
+        writer = SevenZipArchiveWriter(
+            archive_path, password="pw", volume_size=VolumeSize(bytes=100_000)
+        )
+        writer.add_files([src])
+        writer.close()
+
+        reader = SevenZipArchiveReader(writer.output_path, password="pw")
+        dest = tmp_path / "extracted"
+        reader.extract_all(dest)
+        reader.close()
+        assert_tree_equal(src, dest / "blob")

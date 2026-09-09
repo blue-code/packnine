@@ -1,6 +1,7 @@
 """도메인 엔티티 모음. 외부 압축 라이브러리에 의존하지 않는다."""
 from __future__ import annotations
 
+import pathlib
 from dataclasses import dataclass
 
 
@@ -27,6 +28,10 @@ class ArchiveManifest:
 
     entries: list[ArchiveEntry]
     format_name: str
+    # 분할 압축 결과를 호출자가 알 수 있도록 남기는 메타 정보. 압축 결과가 볼륨 하나에
+    # 들어가면 .001 없이 저장되므로, 사용자가 지정한 경로와 실제 파일 경로가 다를 수 있다.
+    archive_path: pathlib.Path | None = None
+    volume_count: int = 1
 
     @property
     def total_uncompressed_size(self) -> int:

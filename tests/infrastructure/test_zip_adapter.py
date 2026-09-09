@@ -249,3 +249,87 @@ class TestZipSecurityRegression:
         reader.close()
 
         assert not (tmp_path.parent / "evil.txt").exists()
+
+
+class TestZipVolumes:
+    def _make_incompressible_source(self, tmp_path: pathlib.Path) -> pathlib.Path:
+        # 랜덤 바이트는 압축되지 않으므로 볼륨 크기 계산이 예측 가능하다.
+        import os
+
+        src = tmp_path / "blob"
+        src.mkdir()
+        (src / "data.bin").write_bytes(os.urandom(300_000))
+        return src
+
+    def test_split_round_trip_creates_three_digit_volumes(self, tmp_path: pathlib.Path):
+        from packnine.domain.value_objects import VolumeSize
+
+        src = self._make_incompressible_source(tmp_path)
+        archive_path = tmp_path / "out.zip"
+
+        writer = ZipArchiveWriter(archive_path, volume_size=VolumeSize(bytes=100_000))
+        writer.add_files([src])
+        writer.close()
+
+        assert not archive_path.exists()
+        volumes = sorted(p.name for p in tmp_path.glob("out.zip.*"))
+        assert volumes[:2] == ["out.zip.001", "out.zip.002"]
+        assert writer.output_path == archive_path.with_name("out.zip.001")
+        assert writer.volume_count == len(volumes)
+
+        reader = ZipArchiveReader(writer.output_path)
+        dest = tmp_path / "extracted"
+        reader.extract_all(dest)
+        reader.close()
+        assert_tree_equal(src, dest / "blob")
+
+    def test_single_volume_result_drops_001_suffix(self, tmp_path: pathlib.Path):
+        from packnine.domain.value_objects import VolumeSize
+
+        src = make_sample_source_tree(tmp_path)
+        archive_path = tmp_path / "out.zip"
+
+        writer = ZipArchiveWriter(archive_path, volume_size=VolumeSize.from_megabytes(10))
+        writer.add_files([src])
+        writer.close()
+
+        assert archive_path.exists()
+        assert list(tmp_path.glob("out.zip.*")) == []
+        assert writer.output_path == archive_path
+        assert writer.volume_count == 1
+
+        reader = ZipArchiveReader(archive_path)
+        assert {e.name for e in reader.list_entries()} >= {"source/a.txt"}
+        reader.close()
+
+    def test_split_with_password_round_trip(self, tmp_path: pathlib.Path):
+        from packnine.domain.value_objects import VolumeSize
+
+        src = self._make_incompressible_source(tmp_path)
+        archive_path = tmp_path / "secret.zip"
+
+        writer = ZipArchiveWriter(
+            archive_path, password="pw", volume_size=VolumeSize(bytes=100_000)
+        )
+        writer.add_files([src])
+        writer.close()
+
+        reader = ZipArchiveReader(writer.output_path, password="pw")
+        dest = tmp_path / "extracted"
+        reader.extract_all(dest)
+        reader.close()
+        assert_tree_equal(src, dest / "blob")
+
+    def test_missing_later_volume_raises_corrupted(self, tmp_path: pathlib.Path):
+        from packnine.domain.value_objects import VolumeSize
+
+        src = self._make_incompressible_source(tmp_path)
+        archive_path = tmp_path / "out.zip"
+        writer = ZipArchiveWriter(archive_path, volume_size=VolumeSize(bytes=100_000))
+        writer.add_files([src])
+        writer.close()
+        # 마지막 볼륨(중앙 디렉터리가 들어 있는 조각)을 지우면 zip으로 열 수 없어야 한다.
+        sorted(tmp_path.glob("out.zip.*"))[-1].unlink()
+
+        with pytest.raises(CorruptedArchiveError):
+            ZipArchiveReader(writer.output_path)

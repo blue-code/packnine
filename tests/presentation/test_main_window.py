@@ -499,3 +499,11 @@ def test_double_click_non_image_entry_does_nothing(qtbot, tmp_path, monkeypatch)
     window._on_table_double_clicked(0, 0)
 
     assert opened_dialogs == []
+
+
+def test_first_volume_is_recognized_as_archive_path(tmp_path):
+    # 분할 첫 볼륨을 드롭하면 압축 대상이 아니라 아카이브로 열어야 한다.
+    from packnine.presentation.gui.main_window import _is_archive_path
+
+    assert _is_archive_path(tmp_path / "photos.7z.001") is True
+    assert _is_archive_path(tmp_path / "photos.zip.001") is True

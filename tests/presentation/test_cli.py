@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
 from packnine.presentation.cli import _has_console, main
 
 
@@ -412,7 +414,7 @@ def test_compress_dialog_command_prefills_sources_and_auto_destination(
     source.write_text("hello " * 20, encoding="utf-8")
     destination = tmp_path / "custom.zip"
     fake = _patch_compress_dialog(
-        monkeypatch, accepted=True, result=([source], destination, None, CompressionLevel.NORMAL)
+        monkeypatch, accepted=True, result=([source], destination, None, CompressionLevel.NORMAL, None)
     )
 
     exit_code = main(["compress-dialog", "--no-collect", str(source)])
@@ -478,7 +480,7 @@ def test_compress_dialog_command_uses_collected_paths(qtbot, tmp_path, monkeypat
     fake = _patch_compress_dialog(
         monkeypatch,
         accepted=True,
-        result=([first, second], destination, None, CompressionLevel.NORMAL),
+        result=([first, second], destination, None, CompressionLevel.NORMAL, None),
     )
 
     exit_code = main(["compress-dialog", str(first)])
@@ -486,3 +488,82 @@ def test_compress_dialog_command_uses_collected_paths(qtbot, tmp_path, monkeypat
     assert exit_code == 0
     assert fake.seen_files == [first, second]
     assert destination.exists()
+
+
+def _make_incompressible_source(tmp_path: pathlib.Path) -> pathlib.Path:
+    import os
+
+    src = tmp_path / "blob.bin"
+    src.write_bytes(os.urandom(2_500_000))
+    return src
+
+
+def test_compress_with_volume_size_splits_and_reports_volumes(tmp_path, capsys):
+    src = _make_incompressible_source(tmp_path)
+    archive_path = tmp_path / "out.7z"
+
+    exit_code = main(["compress", str(src), "-o", str(archive_path), "--volume-size", "1"])
+
+    assert exit_code == 0
+    assert not archive_path.exists()
+    assert (tmp_path / "out.7z.001").exists()
+    assert (tmp_path / "out.7z.003").exists()
+    output = capsys.readouterr().out
+    assert "out.7z.001" in output
+    assert "볼륨" in output
+
+
+def test_list_and_extract_accept_first_volume(tmp_path, capsys):
+    src = _make_incompressible_source(tmp_path)
+    archive_path = tmp_path / "out.zip"
+    assert main(["compress", str(src), "-o", str(archive_path), "--volume-size", "1"]) == 0
+    capsys.readouterr()
+    first_volume = tmp_path / "out.zip.001"
+
+    assert main(["list", str(first_volume)]) == 0
+    assert "blob.bin" in capsys.readouterr().out
+
+    destination = tmp_path / "extracted"
+    assert main(["extract", str(first_volume), "-d", str(destination)]) == 0
+    assert (destination / "blob.bin").read_bytes() == src.read_bytes()
+
+
+def test_compress_volume_size_zero_is_rejected(tmp_path, capsys):
+    # SystemExit로 끝내면 콘솔 없는 실행에서 main()이 모달 메시지 박스를 띄우므로,
+    # 다른 입력 오류와 같이 종료 코드 1 + stderr 안내로 처리해야 한다.
+    src = _make_incompressible_source(tmp_path)
+
+    exit_code = main(["compress", str(src), "-o", str(tmp_path / "out.zip"), "--volume-size", "0"])
+
+    assert exit_code == 1
+    assert "volume-size" in capsys.readouterr().err
+    assert list(tmp_path.glob("out.zip*")) == []
+
+
+def test_compress_volume_size_with_tar_fails_cleanly(tmp_path, capsys):
+    src = _make_incompressible_source(tmp_path)
+
+    exit_code = main(
+        ["compress", str(src), "-o", str(tmp_path / "out.tar.gz"), "--volume-size", "1"]
+    )
+
+    assert exit_code == 1
+    assert "분할" in capsys.readouterr().err
+
+
+def test_compress_dialog_command_passes_volume_size_to_service(qtbot, tmp_path, monkeypatch):
+    from packnine.domain.value_objects import CompressionLevel, VolumeSize
+
+    src = _make_incompressible_source(tmp_path)
+    destination = tmp_path / "split.7z"
+    _patch_compress_dialog(
+        monkeypatch,
+        accepted=True,
+        result=([src], destination, None, CompressionLevel.NORMAL, VolumeSize.from_megabytes(1)),
+    )
+
+    exit_code = main(["compress-dialog", "--no-collect", str(src)])
+
+    assert exit_code == 0
+    assert not destination.exists()
+    assert (tmp_path / "split.7z.001").exists()

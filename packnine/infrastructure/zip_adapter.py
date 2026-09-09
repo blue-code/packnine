@@ -23,7 +23,8 @@ from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import CorruptedArchiveError, InvalidPasswordError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
-from packnine.domain.value_objects import CompressionLevel
+from packnine.domain.value_objects import CompressionLevel, VolumeSize
+from packnine.infrastructure import volume_io
 
 
 def _is_symlink_zipinfo(info: zipfile.ZipInfo) -> bool:
@@ -95,9 +96,17 @@ class ZipArchiveReader:
         self._path = pathlib.Path(path)
         self._password = password
         self._password_bytes = password.encode("utf-8") if password else None
+        # 분할 첫 볼륨(.zip.001)이면 볼륨 묶음을 하나의 파일 객체로 열어 넘긴다.
+        # 라이브러리는 파일 객체를 닫지 않으므로 close()에서 우리가 직접 닫는다.
+        self._volume_source = (
+            volume_io.open_volume_source(self._path) if volume_io.is_first_volume(self._path) else None
+        )
+        source = self._volume_source if self._volume_source is not None else self._path
         try:
-            self._zf = pyzipper.AESZipFile(self._path, mode="r")
+            self._zf = pyzipper.AESZipFile(source, mode="r")
         except (pyzipper.BadZipFile, zipfile.BadZipFile) as exc:
+            if self._volume_source is not None:
+                self._volume_source.close()
             raise CorruptedArchiveError(f"ZIP 파일이 손상되었습니다: {self._path}") from exc
         if self._password_bytes is not None:
             self._zf.setpassword(self._password_bytes)
@@ -186,6 +195,8 @@ class ZipArchiveReader:
 
     def close(self) -> None:
         self._zf.close()
+        if self._volume_source is not None:
+            self._volume_source.close()
 
 
 class ZipArchiveWriter:
@@ -200,9 +211,18 @@ class ZipArchiveWriter:
         path: pathlib.Path,
         password: str | None = None,
         compression_level: CompressionLevel = CompressionLevel.NORMAL,
+        volume_size: VolumeSize | None = None,
     ) -> None:
         self._path = pathlib.Path(path)
         self._password = password
+        # 실제로 만들어진 첫 파일 경로와 볼륨 수. 분할하지 않으면 지정 경로 그대로이고,
+        # 분할했더라도 결과가 한 조각이면 close()에서 .001을 떼어 지정 경로가 된다.
+        self.output_path = self._path
+        self.volume_count = 1
+        self._volume_target = (
+            volume_io.open_volume_target(self._path, volume_size) if volume_size is not None else None
+        )
+        target = self._volume_target if self._volume_target is not None else self._path
 
         if compression_level == CompressionLevel.STORE:
             compression = zipfile.ZIP_STORED
@@ -213,7 +233,7 @@ class ZipArchiveWriter:
 
         if password:
             self._zf: zipfile.ZipFile = pyzipper.AESZipFile(
-                self._path,
+                target,
                 mode="w",
                 compression=compression,
                 compresslevel=compresslevel,
@@ -222,7 +242,7 @@ class ZipArchiveWriter:
             self._zf.setpassword(password.encode("utf-8"))
         else:
             self._zf = zipfile.ZipFile(
-                self._path, mode="w", compression=compression, compresslevel=compresslevel
+                target, mode="w", compression=compression, compresslevel=compresslevel
             )
 
     def add_files(
@@ -250,3 +270,6 @@ class ZipArchiveWriter:
 
     def close(self) -> None:
         self._zf.close()
+        if self._volume_target is not None:
+            self._volume_target.close()
+            self.output_path, self.volume_count = volume_io.finalize_volumes(self._path)
