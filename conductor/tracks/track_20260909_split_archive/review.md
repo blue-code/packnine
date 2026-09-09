@@ -9,7 +9,7 @@
 작성자: Kent
 문서유형: Review
 세션목적: 분할 압축 구현 결과 정리
-track_status: draft
+track_status: approved
 parent_track: track_20260714_bandizip_parity
 depends_on:
   - track_20260909_split_archive (implementation.md)

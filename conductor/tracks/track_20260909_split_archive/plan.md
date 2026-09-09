@@ -9,7 +9,7 @@
 작성자: Kent
 문서유형: Plan
 세션목적: 우클릭 "PackNine으로 압축하기..." 옵션 창에 분할 압축(볼륨)과 메일 첨부 용량 프리셋 추가
-track_status: draft
+track_status: approved
 parent_track: track_20260714_bandizip_parity
 depends_on:
   - track_20260708_packnine_archiver
@@ -70,12 +70,12 @@ zipfile 미지원을 이유로 후속 후보(Out)로 남겼다. v0.7.0에서 우
 
 ## 6. 성공 기준
 
-- [ ] zip/7z 분할 쓰기 → 읽기 → 원본과 동일(왕복) 테스트 통과
-- [ ] 결과가 볼륨 크기 이하일 때 `.001` 없이 단일 파일 생성
-- [ ] `.001` 첫 볼륨으로 list/extract/smart-extract/GUI 열기 동작
-- [ ] 옵션 창 프리셋 선택 시 MB 입력란이 채워지고 get_result에 바이트 값이 실림
-- [ ] tar 계열 포맷 선택 시 분할 옵션 비활성화
-- [ ] 전체 테스트 스위트 그린, README 갱신, v0.8.0 릴리스
+- [x] zip/7z 분할 쓰기 → 읽기 → 원본과 동일(왕복) 테스트 통과
+- [x] 결과가 볼륨 크기 이하일 때 `.001` 없이 단일 파일 생성
+- [x] `.001` 첫 볼륨으로 list/extract/smart-extract/GUI 열기 동작 (빌드된 exe로 스모크 확인)
+- [x] 옵션 창 프리셋 선택 시 MB 입력란이 채워지고 get_result에 바이트 값이 실림
+- [x] tar 계열 포맷 선택 시 분할 옵션 비활성화
+- [x] 전체 테스트 스위트 그린(325 passed), README 갱신, v0.8.0 릴리스 게시(Windows/macOS 3종 첨부)
 
 ## 7. 리스크 및 가정
 
