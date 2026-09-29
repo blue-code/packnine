@@ -8,13 +8,22 @@ from __future__ import annotations
 
 import pathlib
 import re
+from typing import Collection
 
 from packnine.domain.entities import ArchiveManifest
 
 
-def _resolve_unique_file_path(path: pathlib.Path) -> pathlib.Path:
-    """path가 이미 존재하면 stem 뒤에 _2, _3 ... 을 붙여 존재하지 않는 경로를 찾는다."""
-    if not path.exists():
+def resolve_unique_file_path(
+    path: pathlib.Path, *, taken: Collection[pathlib.Path] = ()
+) -> pathlib.Path:
+    """path가 이미 존재하면 stem 뒤에 _2, _3 ... 을 붙여 존재하지 않는 경로를 찾는다.
+
+    taken은 "디스크에는 아직 없지만 이번 작업에서 이미 배정한" 경로들이다. 항목별 병렬
+    압축처럼 여러 목적지를 파일 생성 전에 미리 정할 때, 서로 같은 이름을 집어가는 충돌을
+    막는다(같은 이름의 파일을 서로 다른 폴더에서 모아 한 폴더에 압축하는 경우).
+    """
+    taken_set = {pathlib.Path(p) for p in taken}
+    if not path.exists() and path not in taken_set:
         return path
 
     stem = path.stem
@@ -22,9 +31,13 @@ def _resolve_unique_file_path(path: pathlib.Path) -> pathlib.Path:
     counter = 2
     while True:
         candidate = path.with_name(f"{stem}_{counter}{suffix}")
-        if not candidate.exists():
+        if not candidate.exists() and candidate not in taken_set:
             return candidate
         counter += 1
+
+
+# 기존 호출부 호환용 별칭(내부 전용 이름으로 쓰이던 것을 공개 함수로 승격했다).
+_resolve_unique_file_path = resolve_unique_file_path
 
 
 def _resolve_unique_dir_path(path: pathlib.Path) -> pathlib.Path:

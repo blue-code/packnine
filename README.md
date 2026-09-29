@@ -33,6 +33,13 @@ ZIP, 7Z, TAR 계열(GZ/BZ2/XZ) 압축·해제와 RAR 해제를 지원하며, 설
   알집에서 열리며 Windows 탐색기 기본 풀기로는 열리지 않음)
 - **알아서 압축 / 알아서 압축풀기**: 목적지 경로·파일명을 다이얼로그 없이 자동으로 정해
   바로 처리 (`smart-compress`/`smart-extract`)
+- **멀티코어 각각 압축**: "각각 압축하기"는 항목들을 CPU 코어 수에 맞춰 동시에 압축한다
+  (6개 항목 기준 3.7배 단축). `-j/--jobs`로 동시 실행 개수를 조절할 수 있음
+- **중복 파일 처리 선택**: 해제 시 같은 이름의 파일이 있으면 덮어쓰기 / 건너뛰기 /
+  둘 다 남기기(`_2` 접미사)를 고를 수 있음. GUI는 충돌이 있을 때만 물어보고, CLI는
+  `--on-conflict overwrite|skip|rename`로 지정 (기본값은 기존 동작인 덮어쓰기)
+- **드래그 아웃**: 아카이브를 연 상태에서 파일·폴더를 탐색기로 끌어내면 그대로 복사됨
+  (임시 폴더에 꺼낸 뒤 넘기며, 원본 아카이브의 MoTW 표시를 함께 물려줌)
 - **탐색기 우클릭 메뉴**: 설치 프로그램 또는 `packnine register-context-menu`로 등록하면
   "PackNine" 하위 메뉴 하나로 묶여 표시 (다중 선택 지원, 관리자 권한 불필요)
   - 파일: PackNine으로 압축하기...(옵션 창: 포맷·강도·비밀번호·분할) · 압축하기(즉시)
@@ -135,8 +142,15 @@ packnine smart-compress --each file1.txt file2.txt
 # (우클릭 "PackNine으로 압축하기..."가 호출하는 명령. --no-collect는 다중 선택 병합 생략)
 packnine compress-dialog --no-collect file1.txt file2.txt
 
+# 각각 압축하기를 4개씩 동시에(멀티코어)
+packnine smart-compress --each -j 4 file1.txt file2.txt file3.txt file4.txt
+
 # 알아서 압축풀기: 아카이브 안에 루트 항목이 하나뿐이면 바로, 여러 개면 새 폴더에 풀기
 packnine smart-extract output.zip
+
+# 같은 이름의 파일이 있을 때: 건너뛰기 / 둘 다 남기기
+packnine extract output.zip -d .\extracted --on-conflict skip
+packnine extract output.zip -d .\extracted --on-conflict rename
 
 # 아카이브 내용 목록 조회
 packnine list output.zip

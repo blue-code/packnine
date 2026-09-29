@@ -45,7 +45,13 @@ from packnine.application.inspect_service import InspectService
 from packnine.application.update_service import UpdateService
 from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryError
+from packnine.domain.value_objects import DuplicatePolicy
 from packnine.presentation.gui.image_viewer import ImageViewerDialog, is_image_name
+from packnine.presentation.gui.widgets.archive_table import (
+    ROLE_KIND,
+    ROLE_PATH,
+    ArchiveTableWidget,
+)
 
 # 이미지 미리보기를 위해 한 번에 임시 폴더로 미리 꺼내둘 이미지 개수 상한.
 # 이미지가 매우 많은 아카이브에서 더블클릭 한 번에 전부 해제하느라 오래 걸리는 것을 막는다.
@@ -74,8 +80,9 @@ _TABLE_HEADERS = ["이름", "크기", "압축크기", "압축률", "수정한 �
 
 # 테이블 아이템에 붙이는 커스텀 데이터 롤.
 # _ROLE_PATH: 아카이브 내부 전체 경로("pics/photo.png"), _ROLE_KIND: "file"/"folder"/"up"
-_ROLE_PATH = Qt.ItemDataRole.UserRole
-_ROLE_KIND = Qt.ItemDataRole.UserRole + 1
+# 드래그 아웃 위젯이 같은 롤로 행을 읽으므로 정의를 위젯 모듈 한 곳에 둔다.
+_ROLE_PATH = ROLE_PATH
+_ROLE_KIND = ROLE_KIND
 
 # PyInstaller로 빌드하면 리소스가 sys._MEIPASS 아래에 풀리므로, 개발 환경(소스 실행)과
 # 빌드 환경 양쪽에서 아이콘을 찾을 수 있도록 두 경로를 모두 시도한다.
@@ -208,7 +215,9 @@ class MainWindow(QMainWindow):
         left_splitter.setSizes([340, 260])
 
         # 우측: 현재 폴더의 파일 목록
-        self._table = QTableWidget(0, len(_TABLE_HEADERS))
+        self._table = ArchiveTableWidget(0, len(_TABLE_HEADERS))
+        # 선택 항목을 탐색기로 끌어낼 때 임시 폴더에 실체화하는 함수를 연결한다.
+        self._table.set_drag_materializer(self._materialize_entries_for_drag)
         self._table.setHorizontalHeaderLabels(_TABLE_HEADERS)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -369,6 +378,11 @@ class MainWindow(QMainWindow):
         if not destination_str:
             return
         destination = pathlib.Path(destination_str)
+
+        duplicate_policy = self._ask_duplicate_policy(destination)
+        if duplicate_policy is None:
+            return  # 사용자가 취소했다
+
         progress = self._make_progress_dialog("압축 해제 중...")
         try:
             completed = self._execute_with_password_retry(
@@ -377,6 +391,7 @@ class MainWindow(QMainWindow):
                     destination,
                     password=password,
                     on_progress=self._progress_callback(progress),
+                    duplicate_policy=duplicate_policy,
                 )
             )
         except UnsafeArchiveEntryError as exc:
@@ -388,6 +403,47 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "완료", f"압축 해제가 완료되었습니다: {destination}")
         finally:
             progress.close()
+
+    def _ask_duplicate_policy(
+        self, destination: pathlib.Path
+    ) -> DuplicatePolicy | None:
+        """목적지에 같은 이름의 파일이 있으면 어떻게 할지 묻는다.
+
+        충돌이 없으면 묻지 않고 기본값(덮어쓰기)을 돌려준다 - 매번 뜨는 확인 창만큼
+        성가신 것이 없다. 취소를 고르면 None을 돌려줘 해제 자체를 중단한다.
+        """
+        if self._current_manifest is None:
+            return DuplicatePolicy.OVERWRITE
+
+        conflicts = self._extract_service.find_conflicts(self._current_manifest, destination)
+        if not conflicts:
+            return DuplicatePolicy.OVERWRITE
+
+        sample = "\n".join(f"  · {name}" for name in conflicts[:5])
+        if len(conflicts) > 5:
+            sample += f"\n  · … 외 {len(conflicts) - 5}개"
+
+        box = QMessageBox(self)
+        box.setWindowTitle("같은 이름의 파일이 있습니다")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"이미 있는 파일 {len(conflicts)}개를 어떻게 할까요?")
+        box.setInformativeText(sample)
+        overwrite_button = box.addButton("덮어쓰기", QMessageBox.ButtonRole.DestructiveRole)
+        skip_button = box.addButton("건너뛰기", QMessageBox.ButtonRole.AcceptRole)
+        rename_button = box.addButton("둘 다 남기기", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        # 실수로 엔터를 쳐도 기존 파일이 날아가지 않도록 기본 버튼은 건너뛰기로 둔다.
+        box.setDefaultButton(skip_button)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is overwrite_button:
+            return DuplicatePolicy.OVERWRITE
+        if clicked is skip_button:
+            return DuplicatePolicy.SKIP
+        if clicked is rename_button:
+            return DuplicatePolicy.RENAME
+        return None
 
     def _on_test(self) -> None:
         """현재 아카이브를 임시 폴더에 해제해보고 성공/실패만 알려준다(결과물은 남기지 않음)."""
@@ -892,6 +948,54 @@ class MainWindow(QMainWindow):
             self._open_image_viewer(clicked_entry_name=entry.name)
         else:
             self._open_entry_with_default_app(entry.name)
+
+    def _materialize_entries_for_drag(self, entry_paths: list[str]) -> list[pathlib.Path]:
+        """드래그 아웃 대상 엔트리를 임시 폴더에 꺼내고, 끌어낼 실제 경로를 돌려준다.
+
+        폴더를 끌면 그 하위 엔트리를 모두 꺼낸 뒤 폴더 경로 하나만 넘긴다(탐색기가
+        폴더째 복사한다). 해제가 실패하거나 사용자가 비밀번호 입력을 취소하면 빈 목록을
+        돌려줘 드래그 자체를 시작하지 않게 한다.
+        """
+        if self._current_archive_path is None or self._current_manifest is None:
+            return []
+
+        # 폴더 선택은 하위 엔트리로 펼친다. 중복 선택(폴더와 그 안의 파일을 함께 선택)해도
+        # 같은 엔트리를 두 번 꺼내지 않도록 순서를 유지한 채 접는다.
+        entry_names: list[str] = []
+        seen: set[str] = set()
+        for path in entry_paths:
+            prefix = f"{path}/"
+            for entry in self._current_manifest.entries:
+                if entry.name == path or entry.name.startswith(prefix):
+                    if entry.name not in seen:
+                        seen.add(entry.name)
+                        entry_names.append(entry.name)
+        if not entry_names:
+            return []
+
+        temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="packnine_drag_"))
+        try:
+            completed = self._execute_with_password_retry(
+                lambda password: self._extract_service.extract_entries(
+                    self._current_archive_path, entry_names, temp_dir, password=password
+                )
+            )
+        except UnsafeArchiveEntryError as exc:
+            self._show_security_warning(exc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return []
+        except Exception as exc:  # noqa: BLE001 - 드래그 중 크래시 대신 메시지로 알린다
+            self._show_error(exc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return []
+        if not completed:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return []
+
+        # 탐색기가 비동기로 복사할 수 있으므로 드래그가 끝나도 바로 지우지 않고
+        # 창을 닫을 때 정리한다(_open_temp_dirs와 같은 수명 관리).
+        self._open_temp_dirs.append(temp_dir)
+        return [temp_dir / path for path in entry_paths]
 
     def _open_entry_with_default_app(self, entry_name: str) -> None:
         """엔트리를 임시 폴더에 꺼내 OS 기본 연결 프로그램으로 연다."""

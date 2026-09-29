@@ -507,3 +507,94 @@ def test_first_volume_is_recognized_as_archive_path(tmp_path):
 
     assert _is_archive_path(tmp_path / "photos.7z.001") is True
     assert _is_archive_path(tmp_path / "photos.zip.001") is True
+
+
+def test_drag_out_materializes_selected_file_to_real_path(qtbot, tmp_path):
+    # 드래그 아웃: 아카이브 안의 엔트리를 탐색기가 복사할 수 있는 실제 파일로 꺼낸다.
+    from packnine.application.compress_service import CompressService
+
+    src_dir = tmp_path / "docs"
+    src_dir.mkdir()
+    (src_dir / "inner.txt").write_text("끌어낸 내용", encoding="utf-8")
+    archive_path = tmp_path / "out.zip"
+    CompressService().compress([src_dir], archive_path)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+
+    paths = window._materialize_entries_for_drag(["docs/inner.txt"])
+
+    assert len(paths) == 1
+    assert paths[0].name == "inner.txt"
+    assert paths[0].read_text(encoding="utf-8") == "끌어낸 내용"
+
+
+def test_drag_out_of_folder_extracts_its_children(qtbot, tmp_path):
+    # 폴더를 끌면 하위 엔트리까지 실체화하고, 끌어낼 경로는 폴더 하나만 돌려준다.
+    from packnine.application.compress_service import CompressService
+
+    src_dir = tmp_path / "docs"
+    (src_dir / "sub").mkdir(parents=True)
+    (src_dir / "sub" / "deep.txt").write_text("깊은 파일", encoding="utf-8")
+    archive_path = tmp_path / "out.zip"
+    CompressService().compress([src_dir], archive_path)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive_path)
+
+    paths = window._materialize_entries_for_drag(["docs"])
+
+    assert len(paths) == 1
+    assert paths[0].name == "docs"
+    assert (paths[0] / "sub" / "deep.txt").read_text(encoding="utf-8") == "깊은 파일"
+
+
+def test_drag_out_without_open_archive_returns_empty(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._materialize_entries_for_drag(["a.txt"]) == []
+
+
+def test_extract_asks_nothing_when_no_conflict(qtbot, tmp_path):
+    # 충돌이 없으면 확인 창을 띄우지 않고 기본값(덮어쓰기)으로 진행해야 한다.
+    from packnine.application.compress_service import CompressService
+    from packnine.domain.value_objects import DuplicatePolicy
+
+    source = tmp_path / "a.txt"
+    source.write_text("내용", encoding="utf-8")
+    archive = tmp_path / "out.zip"
+    CompressService().compress([source], archive)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive)
+
+    assert window._ask_duplicate_policy(tmp_path / "비어있는폴더") is DuplicatePolicy.OVERWRITE
+
+
+def test_extract_asks_policy_when_conflict_exists(qtbot, tmp_path, monkeypatch):
+    from packnine.application.compress_service import CompressService
+    from packnine.domain.value_objects import DuplicatePolicy
+    from PySide6.QtWidgets import QMessageBox
+
+    source = tmp_path / "a.txt"
+    source.write_text("내용", encoding="utf-8")
+    archive = tmp_path / "out.zip"
+    CompressService().compress([source], archive)
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_text("기존", encoding="utf-8")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(archive)
+
+    # 모달 exec()를 가로채 "건너뛰기"(기본 버튼)를 고른 것처럼 만든다.
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: self.defaultButton())
+
+    assert window._ask_duplicate_policy(dest) is DuplicatePolicy.SKIP

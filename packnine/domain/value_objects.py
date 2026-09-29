@@ -6,7 +6,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import Enum, IntEnum
+
+
+class DuplicatePolicy(Enum):
+    """해제 시 목적지에 같은 이름의 파일이 이미 있을 때의 처리 방식.
+
+    기본값은 OVERWRITE다 - 이 기능이 생기기 전의 동작이라, 정책을 지정하지 않은
+    기존 호출부의 결과가 달라지지 않아야 한다.
+    """
+
+    OVERWRITE = "overwrite"  # 기존 파일을 덮어쓴다
+    SKIP = "skip"  # 기존 파일을 그대로 두고 해당 엔트리는 풀지 않는다
+    RENAME = "rename"  # 기존 파일을 두고 새 파일에 _2, _3 ... 을 붙여 함께 남긴다
 
 
 class CompressionLevel(IntEnum):

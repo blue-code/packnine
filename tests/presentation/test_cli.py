@@ -567,3 +567,58 @@ def test_compress_dialog_command_passes_volume_size_to_service(qtbot, tmp_path, 
     assert exit_code == 0
     assert not destination.exists()
     assert (tmp_path / "split.7z.001").exists()
+
+
+def test_smart_compress_each_accepts_jobs_option(tmp_path, capsys, monkeypatch):
+    # -j는 동시 실행 개수 상한이다. 1로 줘도 결과는 동일해야 한다(순차 경로 회귀 방지).
+    monkeypatch.setattr("packnine.presentation.cli._has_console", lambda: True)
+    sources = []
+    for name in ("a.txt", "b.txt", "c.txt"):
+        path = tmp_path / name
+        path.write_text(f"{name} " * 50, encoding="utf-8")
+        sources.append(str(path))
+
+    exit_code = main(["smart-compress", "--each", "-j", "1", *sources])
+
+    assert exit_code == 0
+    assert {p.name for p in tmp_path.glob("*.zip")} == {"a.zip", "b.zip", "c.zip"}
+    assert capsys.readouterr().out.count("성공") == 3
+
+
+def test_extract_on_conflict_skip_keeps_existing(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("packnine.presentation.cli._has_console", lambda: True)
+    source = tmp_path / "a.txt"
+    source.write_text("아카이브 내용", encoding="utf-8")
+    archive = tmp_path / "out.zip"
+    assert main(["compress", str(source), "-o", str(archive)]) == 0
+    capsys.readouterr()
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_text("기존 내용", encoding="utf-8")
+
+    exit_code = main(["extract", str(archive), "-d", str(dest), "--on-conflict", "skip"])
+
+    assert exit_code == 0
+    assert (dest / "a.txt").read_text(encoding="utf-8") == "기존 내용"
+
+
+def test_smart_extract_on_conflict_rename_keeps_both(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("packnine.presentation.cli._has_console", lambda: True)
+    source = tmp_path / "a.txt"
+    source.write_text("아카이브 내용", encoding="utf-8")
+    archive = tmp_path / "out.zip"
+    assert main(["compress", str(source), "-o", str(archive)]) == 0
+    capsys.readouterr()
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_text("기존 내용", encoding="utf-8")
+
+    exit_code = main(
+        ["smart-extract", str(archive), "--dest-dir", str(dest), "--here", "--on-conflict", "rename"]
+    )
+
+    assert exit_code == 0
+    assert (dest / "a.txt").read_text(encoding="utf-8") == "기존 내용"
+    assert (dest / "a_2.txt").read_text(encoding="utf-8") == "아카이브 내용"

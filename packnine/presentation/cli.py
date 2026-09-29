@@ -69,7 +69,21 @@ from packnine.domain.exceptions import (
     UnsafeArchiveEntryError,
     UnsupportedFormatError,
 )
-from packnine.domain.value_objects import CompressionLevel, VolumeSize
+from packnine.domain.value_objects import CompressionLevel, DuplicatePolicy, VolumeSize
+
+
+def _add_conflict_option(parser: argparse.ArgumentParser) -> None:
+    """해제 계열 서브커맨드에 공통으로 붙는 중복 파일 처리 옵션.
+
+    기본값은 overwrite다 - 이 옵션이 생기기 전의 동작이라 스크립트가 깨지지 않는다.
+    """
+    parser.add_argument(
+        "--on-conflict",
+        choices=[policy.value for policy in DuplicatePolicy],
+        default=DuplicatePolicy.OVERWRITE.value,
+        help="목적지에 같은 이름의 파일이 있을 때: overwrite(덮어쓰기, 기본) / "
+        "skip(건너뛰기) / rename(둘 다 남기기)",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -102,6 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
     extract_parser.add_argument("archive", help="해제할 아카이브 경로")
     extract_parser.add_argument("-d", "--destination", required=True, help="해제 대상 폴더")
     extract_parser.add_argument("--password", default=None, help="암호화 비밀번호")
+    _add_conflict_option(extract_parser)
 
     list_parser = subparsers.add_parser("list", help="아카이브 내용을 목록으로 출력한다")
     list_parser.add_argument("archive", help="조회할 아카이브 경로")
@@ -132,6 +147,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="선택한 항목들을 하나로 묶지 않고 항목별로 각각 압축한다(각각 압축하기)",
     )
+    smart_compress_parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="--each 시 동시에 압축할 항목 수(기본: CPU 코어 수에 맞춰 자동)",
+    )
 
     # 우클릭 "PackNine으로 압축하기..." - 즉시 압축(smart-compress)과 달리 옵션 창을 띄운다.
     compress_dialog_parser = subparsers.add_parser(
@@ -155,6 +178,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="해제 기준 폴더(base_destination). 없으면 각 아카이브와 같은 폴더를 사용",
     )
+    _add_conflict_option(smart_extract_parser)
     smart_extract_parser.add_argument(
         "--here",
         action="store_true",
@@ -232,7 +256,12 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     service = ExtractService()
     archive_path = pathlib.Path(args.archive)
     destination = pathlib.Path(args.destination)
-    manifest = service.extract(archive_path, destination, password=args.password)
+    manifest = service.extract(
+        archive_path,
+        destination,
+        password=args.password,
+        duplicate_policy=DuplicatePolicy(args.on_conflict),
+    )
     print(f"압축 해제 완료: {len(manifest.entries)}개 항목, 대상 경로: {destination}")
     return 0
 
@@ -270,44 +299,52 @@ def _has_console() -> bool:
 def _smart_compress_each(args: argparse.Namespace) -> int:
     """선택 항목들을 항목별로 각각 압축한다(반디집 "각각 압축하기" 대응).
 
-    하나가 실패해도 나머지는 계속 진행하고, 실패가 하나라도 있으면 1을 반환한다.
+    항목끼리 독립적이라 CompressService가 여러 코어에 나눠 동시에 처리한다. 하나가
+    실패해도 나머지는 계속 진행하고, 실패가 하나라도 있으면 1을 반환한다.
     """
     service = CompressService()
     level = _compression_level_from_int(args.level)
     dest_dir = pathlib.Path(args.dest_dir) if args.dest_dir else None
+    sources = [pathlib.Path(p) for p in args.sources]
     use_gui_progress = not _has_console()
+
+    def run(on_item_done):
+        return service.compress_each(
+            sources,
+            dest_dir=dest_dir,
+            password=args.password,
+            compression_level=level,
+            max_workers=args.jobs,
+            on_item_done=on_item_done,
+        )
 
     if use_gui_progress:
         from packnine.presentation.gui import quick_progress
 
+        captured: dict[str, list] = {}
+
+        def operation(on_progress):
+            def on_item_done(source, done, total):
+                # 병렬이라 항목별 바이트 진행률을 섞어 보여주면 막대가 요동친다.
+                # "몇 개 중 몇 개 끝났는지"만 보여주는 쪽이 정확하고 읽기 쉽다.
+                on_progress(f"압축 중: {source.name}", done, total)
+
+            captured["results"] = run(on_item_done)
+
+        if not quick_progress.run_with_progress("각각 압축 중...", operation):
+            return 1
+        results = captured.get("results", [])
+        return 1 if any(r.error is not None for r in results) else 0
+
+    results = run(None)
     had_failure = False
-    for source_str in args.sources:
-        source = pathlib.Path(source_str)
-        auto_name = smart_naming.resolve_smart_compress_destination([source]).name
-        destination = (dest_dir / auto_name) if dest_dir else source.parent / auto_name
-
-        def operation(on_progress, _source=source, _destination=destination):
-            return service.compress(
-                [_source],
-                _destination,
-                password=args.password,
-                compression_level=level,
-                on_progress=on_progress,
-            )
-
-        if use_gui_progress:
-            if not quick_progress.run_with_progress(f"압축 중: {source.name}", operation):
-                had_failure = True
-            continue
-
-        try:
-            manifest = operation(None)
-        except (FileNotFoundError, OSError) as exc:
-            print(f"실패: {source} - {exc}")
+    for result in results:
+        if result.error is not None:
+            print(f"실패: {result.source} - {result.error}")
             had_failure = True
         else:
-            print(f"성공: {destination} ({len(manifest.entries)}개 항목)")
-
+            entry_count = len(result.manifest.entries) if result.manifest else 0
+            print(f"성공: {result.destination} ({entry_count}개 항목)")
     return 1 if had_failure else 0
 
 
@@ -488,7 +525,11 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
                 _archive, _base, args.here, password
             )
             manifest = service.extract(
-                _archive, destination, password=password, on_progress=on_progress
+                _archive,
+                destination,
+                password=password,
+                on_progress=on_progress,
+                duplicate_policy=DuplicatePolicy(args.on_conflict),
             )
             return destination, manifest
 
