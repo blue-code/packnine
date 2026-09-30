@@ -6,7 +6,19 @@
 """
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from packnine.infrastructure import packaged_app
+
+# 판별은 경로 조각을 비교하는데, 비-Windows에서는 pathlib이 PosixPath라 역슬래시를 구분자로
+# 보지 않는다("C:\\...\\WindowsApps\\..." 전체가 조각 하나가 된다). MSIX 자체가 Windows
+# 전용이고 다른 OS에서는 항상 False면 충분하므로, 레지스트리 테스트와 같은 방식으로
+# Windows에서만 돌린다.
+pytestmark = pytest.mark.skipif(
+    sys.platform != "win32", reason="MSIX 패키지 판별은 Windows 전용 기능입니다"
+)
 
 
 def test_detects_windowsapps_install_path_as_packaged():
