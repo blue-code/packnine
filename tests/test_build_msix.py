@@ -57,3 +57,36 @@ def test_manifest_declares_extract_verbs():
     assert "PackNine으로 알아서 풀기" in xml
     assert "PackNine으로 여기에 풀기" in xml
     assert "smart-extract" in xml
+
+
+def test_manifest_registers_shell_extension_com_server():
+    # Win11 모던 컨텍스트 메뉴는 COM 핸들러를 통해서만 노출된다.
+    xml = build_msix.build_manifest("0.11.0.0", (".zip",))
+    ET.fromstring(xml)  # 네임스페이스가 늘었으므로 여전히 유효한 XML인지 확인
+
+    assert build_msix.SHELL_EXTENSION_CLSID in xml
+    assert build_msix.SHELL_EXTENSION_DLL in xml
+    assert "windows.comServer" in xml
+
+
+def test_manifest_puts_compress_verb_on_all_files_and_folders():
+    xml = build_msix.build_manifest("0.11.0.0", (".zip",))
+
+    assert "windows.fileExplorerContextMenus" in xml
+    assert '<desktop5:ItemType Type="*">' in xml
+    assert '<desktop5:ItemType Type="Directory">' in xml
+
+
+def test_clsid_matches_rust_source():
+    """매니페스트와 Rust 쪽 CLSID가 어긋나면 메뉴가 조용히 안 뜬다 - 값을 직접 비교한다."""
+    import pathlib
+
+    source = (
+        pathlib.Path(build_msix.__file__).resolve().parent.parent
+        / "shellext"
+        / "src"
+        / "lib.rs"
+    ).read_text(encoding="utf-8")
+
+    compact = build_msix.SHELL_EXTENSION_CLSID.replace("-", "").lower()
+    assert compact in source.replace("_", "").lower()

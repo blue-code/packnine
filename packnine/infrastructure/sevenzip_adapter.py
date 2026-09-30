@@ -17,8 +17,9 @@ from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import CorruptedArchiveError, InvalidPasswordError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
+from packnine.domain.file_filter import ExcludeFilter
 from packnine.domain.value_objects import CompressionLevel, VolumeSize
-from packnine.infrastructure import volume_io
+from packnine.infrastructure import source_walk, volume_io
 
 
 @contextlib.contextmanager
@@ -145,7 +146,9 @@ class SevenZipArchiveWriter:
         password: str | None = None,
         compression_level: CompressionLevel = CompressionLevel.NORMAL,
         volume_size: VolumeSize | None = None,
+        exclude_filter: ExcludeFilter | None = None,
     ) -> None:
+        self._exclude_filter = exclude_filter or ExcludeFilter()
         self._path = pathlib.Path(path)
         self._password = password
         # 실제로 만들어진 첫 파일 경로와 볼륨 수(zip 어댑터와 같은 규칙).
@@ -170,6 +173,16 @@ class SevenZipArchiveWriter:
         paths: list[pathlib.Path],
         on_progress: ProgressCallback | None = None,
     ) -> None:
+        if not self._exclude_filter.is_empty:
+            # 제외 패턴이 있으면 writeall의 재귀에 맡길 수 없으므로 파일 단위로 담는다.
+            file_list = source_walk.collect_files(paths, self._exclude_filter)
+            total = len(file_list)
+            for done, (file_path, arcname) in enumerate(file_list, start=1):
+                self._archive.write(file_path, arcname=arcname)
+                if on_progress is not None:
+                    on_progress(arcname, done, total)
+            return
+
         total = len(paths)
         for done, raw_path in enumerate(paths, start=1):
             path = pathlib.Path(raw_path)

@@ -14,6 +14,8 @@ from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import CorruptedArchiveError, UnsupportedFormatError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
+from packnine.domain.file_filter import ExcludeFilter
+from packnine.infrastructure import source_walk
 from packnine.domain.value_objects import CompressionLevel
 
 
@@ -118,8 +120,10 @@ class TarArchiveWriter:
         path: pathlib.Path,
         password: str | None = None,
         compression_level: CompressionLevel = CompressionLevel.NORMAL,
+        exclude_filter: ExcludeFilter | None = None,
     ) -> None:
         # tar는 암호화를 지원하지 않으므로 password는 무시한다(레지스트리 시그니처 통일용).
+        self._exclude_filter = exclude_filter or ExcludeFilter()
         self._path = pathlib.Path(path)
         # tar는 분할을 지원하지 않는다(레지스트리가 사전에 거부). zip/7z writer와 같은
         # 결과 메타 속성을 두어 CompressService가 포맷을 구분하지 않고 읽을 수 있게 한다.
@@ -133,6 +137,16 @@ class TarArchiveWriter:
         paths: list[pathlib.Path],
         on_progress: ProgressCallback | None = None,
     ) -> None:
+        if not self._exclude_filter.is_empty:
+            # 제외 패턴이 있으면 직접 펼쳐 파일 단위로 담는다(재귀에 맡기면 걸러낼 수 없다).
+            file_list = source_walk.collect_files(paths, self._exclude_filter)
+            total = len(file_list)
+            for done, (file_path, arcname) in enumerate(file_list, start=1):
+                self._tf.add(file_path, arcname=arcname, recursive=False)
+                if on_progress is not None:
+                    on_progress(arcname, done, total)
+            return
+
         total = len(paths)
         for done, raw_path in enumerate(paths, start=1):
             path = pathlib.Path(raw_path)

@@ -23,8 +23,9 @@ from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import CorruptedArchiveError, InvalidPasswordError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
+from packnine.domain.file_filter import ExcludeFilter
 from packnine.domain.value_objects import CompressionLevel, VolumeSize
-from packnine.infrastructure import volume_io
+from packnine.infrastructure import source_walk, volume_io
 
 
 def _is_symlink_zipinfo(info: zipfile.ZipInfo) -> bool:
@@ -212,7 +213,9 @@ class ZipArchiveWriter:
         password: str | None = None,
         compression_level: CompressionLevel = CompressionLevel.NORMAL,
         volume_size: VolumeSize | None = None,
+        exclude_filter: ExcludeFilter | None = None,
     ) -> None:
+        self._exclude_filter = exclude_filter or ExcludeFilter()
         self._path = pathlib.Path(path)
         self._password = password
         # 실제로 만들어진 첫 파일 경로와 볼륨 수. 분할하지 않으면 지정 경로 그대로이고,
@@ -251,16 +254,8 @@ class ZipArchiveWriter:
         on_progress: ProgressCallback | None = None,
     ) -> None:
         # 진행률 total을 정확히 계산하려면, 디렉터리를 먼저 파일 목록으로 평탄화해야 한다.
-        file_list: list[tuple[pathlib.Path, str]] = []
-        for raw_path in paths:
-            path = pathlib.Path(raw_path)
-            if path.is_dir():
-                for file_path in sorted(path.rglob("*")):
-                    if file_path.is_file():
-                        arcname = f"{path.name}/{file_path.relative_to(path).as_posix()}"
-                        file_list.append((file_path, arcname))
-            else:
-                file_list.append((path, path.name))
+        # 평탄화와 제외 패턴 적용은 세 어댑터가 공유한다(source_walk).
+        file_list = source_walk.collect_files(paths, self._exclude_filter)
 
         total = len(file_list)
         for done, (file_path, arcname) in enumerate(file_list, start=1):

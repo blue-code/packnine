@@ -34,10 +34,15 @@ IDENTITY_NAME = "3067F945.PackNine"
 IDENTITY_PUBLISHER = "CN=6A813624-B2E1-4883-B336-B24D70A7BB09"
 PUBLISHER_DISPLAY_NAME = "수카버스"
 
+# 탐색기 컨텍스트 메뉴 핸들러(shellext)의 CLSID. Rust 쪽 lib.rs의 값과 반드시 같아야 한다.
+SHELL_EXTENSION_CLSID = "D1C9C67D-CF0A-494E-9E84-4FEDB96D2272"
+SHELL_EXTENSION_DLL = "packnine_shellext.dll"
+
 _DIST_DIR = _PROJECT_ROOT / "dist"
 _LAYOUT_DIR = _DIST_DIR / "msix-layout"
 _OUTPUT_MSIX = _DIST_DIR / "PackNine.msix"
 _SOURCE_ICON = _PROJECT_ROOT / "packnine" / "presentation" / "gui" / "assets" / "icon_256.png"
+_SHELLEXT_DLL_PATH = _PROJECT_ROOT / "shellext" / "target" / "release" / SHELL_EXTENSION_DLL
 
 # 스토어가 요구하는 최소 타일 자산. 값은 (파일명, 한 변 픽셀).
 _ASSET_SIZES = (
@@ -75,7 +80,10 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
   xmlns:uap2="http://schemas.microsoft.com/appx/manifest/uap/windows10/2"
   xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap2 uap3 rescap">
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  IgnorableNamespaces="uap uap2 uap3 rescap com desktop4 desktop5">
 
   <Identity
     Name="{IDENTITY_NAME}"
@@ -108,6 +116,27 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
         <uap:DefaultTile Wide310x150Logo="Assets\\Wide310x150Logo.png" />
       </uap:VisualElements>
       <Extensions>
+        <!-- Windows 11 기본(모던) 우클릭 메뉴. 레지스트리 verb는 "추가 옵션 표시" 안쪽으로
+             밀려나므로, 기본 메뉴에 올리려면 IExplorerCommand COM 핸들러가 필요하다. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="PackNine Shell Extension">
+              <com:Class Id="{SHELL_EXTENSION_CLSID}" Path="{SHELL_EXTENSION_DLL}" ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <!-- 모든 파일과 폴더에 "압축하기"를 올린다. 레지스트리 방식으로는 스토어
+                 설치본에서 불가능했던 항목이다. -->
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="PackNineCompress" Clsid="{SHELL_EXTENSION_CLSID}" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="PackNineCompress" Clsid="{SHELL_EXTENSION_CLSID}" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
         <uap3:Extension Category="windows.fileTypeAssociation">
           <uap3:FileTypeAssociation Name="packninearchive" Parameters="open &quot;%1&quot;">
             <uap:DisplayName>PackNine 압축 파일</uap:DisplayName>
@@ -169,6 +198,15 @@ def main() -> int:
     _LAYOUT_DIR.mkdir(parents=True)
 
     shutil.copy2(exe_path, _LAYOUT_DIR / "PackNine.exe")
+    if not _SHELLEXT_DLL_PATH.exists():
+        print(
+            f"셸 확장 DLL이 없습니다: {_SHELLEXT_DLL_PATH}\n"
+            "shellext 폴더에서 빌드하세요: "
+            "cargo +stable-x86_64-pc-windows-gnu build --release",
+            file=sys.stderr,
+        )
+        return 1
+    shutil.copy2(_SHELLEXT_DLL_PATH, _LAYOUT_DIR / SHELL_EXTENSION_DLL)
     _generate_assets(_LAYOUT_DIR / "Assets")
     (_LAYOUT_DIR / "AppxManifest.xml").write_text(
         build_manifest(version, _ARCHIVE_EXTENSIONS), encoding="utf-8"

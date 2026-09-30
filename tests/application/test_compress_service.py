@@ -222,3 +222,59 @@ class TestSplitCompress:
         ExtractService().extract(manifest.archive_path, dest)
 
         assert_tree_equal(src, dest / "blob")
+
+
+def test_exclude_filter_skips_matching_entries(tmp_path):
+    """제외 패턴을 주면 해당 파일/폴더가 아카이브에 들어가지 않는다."""
+    from packnine.application.inspect_service import InspectService
+    from packnine.domain.file_filter import ExcludeFilter
+
+    src = tmp_path / "proj"
+    (src / ".git").mkdir(parents=True)
+    (src / "node_modules" / "pkg").mkdir(parents=True)
+    (src / ".git" / "HEAD").write_text("ref: x", encoding="utf-8")
+    (src / "node_modules" / "pkg" / "index.js").write_text("x " * 50, encoding="utf-8")
+    (src / "main.py").write_text("print('hi') " * 30, encoding="utf-8")
+    (src / "temp.tmp").write_text("버릴 것 " * 30, encoding="utf-8")
+
+    archive = tmp_path / "out.zip"
+    CompressService().compress(
+        [src], archive, exclude_filter=ExcludeFilter.from_text(".git, node_modules, *.tmp")
+    )
+
+    names = {e.name for e in InspectService().list_contents(archive).entries}
+    assert names == {"proj/main.py"}
+
+
+def test_exclude_filter_applies_to_7z_and_tar(tmp_path):
+    from packnine.application.inspect_service import InspectService
+    from packnine.domain.file_filter import ExcludeFilter
+
+    src = tmp_path / "proj"
+    (src / "skipme").mkdir(parents=True)
+    (src / "skipme" / "a.txt").write_text("skip " * 40, encoding="utf-8")
+    (src / "keep.txt").write_text("keep " * 40, encoding="utf-8")
+
+    for extension in (".7z", ".tar"):
+        archive = tmp_path / f"out{extension}"
+        CompressService().compress(
+            [src], archive, exclude_filter=ExcludeFilter.from_text("skipme")
+        )
+        names = {e.name for e in InspectService().list_contents(archive).entries if not e.is_dir}
+        assert names == {"proj/keep.txt"}, extension
+
+
+def test_no_filter_keeps_previous_behaviour(tmp_path):
+    """필터를 주지 않으면 기존과 동일하게 전부 담긴다(회귀 방지)."""
+    from packnine.application.inspect_service import InspectService
+
+    src = tmp_path / "proj"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "a.txt").write_text("a " * 40, encoding="utf-8")
+    (src / "b.txt").write_text("b " * 40, encoding="utf-8")
+
+    archive = tmp_path / "all.zip"
+    CompressService().compress([src], archive)
+
+    names = {e.name for e in InspectService().list_contents(archive).entries}
+    assert names == {"proj/sub/a.txt", "proj/b.txt"}

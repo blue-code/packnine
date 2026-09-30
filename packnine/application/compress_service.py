@@ -13,6 +13,7 @@ from typing import Callable
 
 from packnine.application import smart_naming
 from packnine.domain.entities import ArchiveManifest
+from packnine.domain.file_filter import ExcludeFilter
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.value_objects import CompressionLevel, VolumeSize
 from packnine.infrastructure import format_registry
@@ -53,6 +54,7 @@ class CompressService:
         password: str | None = None,
         compression_level: CompressionLevel = CompressionLevel.NORMAL,
         volume_size: VolumeSize | None = None,
+        exclude_filter: ExcludeFilter | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> ArchiveManifest:
         """source_paths를 destination으로 압축하고 결과 목록을 돌려준다.
@@ -82,6 +84,7 @@ class CompressService:
             password=password,
             compression_level=compression_level,
             volume_size=volume_size,
+            exclude_filter=exclude_filter,
         )
         writer.add_files(list(source_paths), on_progress=on_progress)
         writer.close()

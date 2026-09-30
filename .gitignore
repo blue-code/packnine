@@ -10,3 +10,6 @@ dist/
 htmlcov/
 .vscode/
 .idea/
+
+# Rust 셸 확장 빌드 산출물
+shellext/target/

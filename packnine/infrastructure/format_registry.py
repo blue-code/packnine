@@ -8,6 +8,7 @@ from __future__ import annotations
 import pathlib
 
 from packnine.domain.exceptions import UnsupportedFormatError
+from packnine.domain.file_filter import ExcludeFilter
 from packnine.domain.value_objects import CompressionLevel, VolumeSize
 from packnine.infrastructure import volume_io
 from packnine.infrastructure.rar_adapter import RarArchiveReader
@@ -102,6 +103,7 @@ def get_writer(
     password: str | None = None,
     compression_level: CompressionLevel = CompressionLevel.NORMAL,
     volume_size: VolumeSize | None = None,
+    exclude_filter: ExcludeFilter | None = None,
 ):
     """확장자에 맞는 ArchiveWriter 어댑터 인스턴스를 반환한다.
 
@@ -130,6 +132,15 @@ def get_writer(
     writer_cls = _WRITER_CLASSES[ext]
     if volume_size is not None:
         return writer_cls(
-            path, password=password, compression_level=compression_level, volume_size=volume_size
+            path,
+            password=password,
+            compression_level=compression_level,
+            volume_size=volume_size,
+            exclude_filter=exclude_filter,
         )
-    return writer_cls(path, password=password, compression_level=compression_level)
+    return writer_cls(
+        path,
+        password=password,
+        compression_level=compression_level,
+        exclude_filter=exclude_filter,
+    )

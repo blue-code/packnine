@@ -69,6 +69,7 @@ from packnine.domain.exceptions import (
     UnsafeArchiveEntryError,
     UnsupportedFormatError,
 )
+from packnine.domain.file_filter import ExcludeFilter
 from packnine.domain.value_objects import CompressionLevel, DuplicatePolicy, VolumeSize
 
 
@@ -96,6 +97,12 @@ def _build_parser() -> argparse.ArgumentParser:
     compress_parser.add_argument("sources", nargs="+", help="압축할 파일/폴더 경로들")
     compress_parser.add_argument("-o", "--output", required=True, help="출력 아카이브 경로")
     compress_parser.add_argument("--password", default=None, help="암호화 비밀번호")
+    compress_parser.add_argument(
+        "--exclude",
+        default=None,
+        metavar="패턴",
+        help="압축에서 제외할 패턴(쉼표 구분). 예: --exclude \".git,node_modules,*.tmp\"",
+    )
     compress_parser.add_argument(
         "--level",
         type=int,
@@ -247,6 +254,7 @@ def _cmd_compress(args: argparse.Namespace) -> int:
         password=args.password,
         compression_level=_compression_level_from_int(args.level),
         volume_size=volume_size,
+        exclude_filter=ExcludeFilter.from_text(args.exclude),
     )
     print(f"압축 완료: {len(manifest.entries)}개 항목, 출력 경로: {_describe_output(manifest)}")
     return 0

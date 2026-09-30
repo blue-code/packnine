@@ -622,3 +622,20 @@ def test_smart_extract_on_conflict_rename_keeps_both(tmp_path, capsys, monkeypat
     assert exit_code == 0
     assert (dest / "a.txt").read_text(encoding="utf-8") == "기존 내용"
     assert (dest / "a_2.txt").read_text(encoding="utf-8") == "아카이브 내용"
+
+
+def test_compress_exclude_option_skips_patterns(tmp_path, capsys):
+    src = tmp_path / "proj"
+    (src / ".git").mkdir(parents=True)
+    (src / ".git" / "HEAD").write_text("ref", encoding="utf-8")
+    (src / "keep.txt").write_text("keep " * 40, encoding="utf-8")
+    archive = tmp_path / "out.zip"
+
+    exit_code = main(["compress", str(src), "-o", str(archive), "--exclude", ".git"])
+
+    assert exit_code == 0
+    capsys.readouterr()
+    assert main(["list", str(archive)]) == 0
+    listing = capsys.readouterr().out
+    assert "keep.txt" in listing
+    assert "HEAD" not in listing
