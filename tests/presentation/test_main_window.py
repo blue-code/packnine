@@ -598,3 +598,31 @@ def test_extract_asks_policy_when_conflict_exists(qtbot, tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: self.defaultButton())
 
     assert window._ask_duplicate_policy(dest) is DuplicatePolicy.SKIP
+
+
+def test_file_association_menu_informs_instead_of_failing_when_packaged(
+    qtbot, tmp_path, monkeypatch
+):
+    # 스토어 설치본에서 "파일 연결 설정"을 누르면 빨간 오류창이 아니라 안내가 떠야 한다.
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtWidgets import QMessageBox
+
+    from packnine.infrastructure import packaged_app
+
+    monkeypatch.setattr(packaged_app, "is_packaged", lambda *a: True)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *args, **kwargs: shown.append(args[2])
+    )
+    errors: list = []
+    monkeypatch.setattr(window, "_show_error", lambda exc: errors.append(exc))
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: True)
+
+    window._on_file_association()
+
+    assert errors == []
+    assert len(shown) == 1 and "Windows가 자동으로 관리" in shown[0]

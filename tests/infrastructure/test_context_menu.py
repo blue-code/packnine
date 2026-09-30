@@ -230,3 +230,18 @@ class TestFileAssociation:
 
         context_menu.unregister()
         assert _query_default(ext) is None
+
+
+class TestPackagedMode:
+    def test_register_refuses_in_msix_package(self, monkeypatch):
+        # 스토어 설치본에서 조용히 실패하는 대신 이유를 알려줘야 한다.
+        monkeypatch.setattr(context_menu.packaged_app, "is_packaged", lambda *a: True)
+
+        with pytest.raises(RuntimeError, match="스토어"):
+            context_menu.register()
+
+    def test_unregister_refuses_in_msix_package(self, monkeypatch):
+        monkeypatch.setattr(context_menu.packaged_app, "is_packaged", lambda *a: True)
+
+        with pytest.raises(RuntimeError, match="스토어"):
+            context_menu.unregister()

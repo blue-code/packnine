@@ -35,6 +35,8 @@ import pathlib
 import shutil
 import sys
 
+from packnine.infrastructure import packaged_app
+
 # winreg는 Windows에만 있으므로 모듈 최상단에서 import하지 않고 함수 안에서 지연 import한다.
 # 다만 _delete_tree 호출 시 HKCU 상수만 미리 참조할 수 있게 값을 캐싱해 둔다.
 try:
@@ -70,6 +72,21 @@ _APP_EXE_KEY = "PackNine.exe"
 def _require_windows() -> None:
     if sys.platform != "win32":
         raise RuntimeError("이 기능은 Windows 전용입니다 (winreg 모듈이 필요합니다)")
+
+
+def _reject_when_packaged() -> None:
+    """MSIX(스토어) 설치본에서는 런타임 등록을 시도하지 않고 명확히 거절한다.
+
+    패키지 컨테이너 안에서는 레지스트리 쓰기가 가상화되어 탐색기가 보지 못한다. 그대로
+    두면 "등록했습니다"라고 출력하고도 메뉴가 생기지 않는 조용한 실패가 된다.
+    스토어 설치본의 파일 연결/아카이브 우클릭 메뉴는 패키지 매니페스트가 담당한다.
+    """
+    if packaged_app.is_packaged():
+        raise RuntimeError(
+            "스토어(MSIX)로 설치된 PackNine은 우클릭 메뉴를 직접 등록하지 않습니다. "
+            "압축 파일 연결과 우클릭 메뉴는 Windows가 패키지 정보로 자동 관리합니다. "
+            "설정을 바꾸려면 Windows 설정 > 앱 > 기본 앱에서 PackNine을 지정하세요."
+        )
 
 
 def _resolve_packnine_command() -> str:
@@ -313,6 +330,7 @@ def _restore_default(ext: str) -> None:
 def register() -> None:
     """탐색기 우클릭 메뉴(압축/압축풀기)와 아카이브 확장자 파일 연결을 등록한다."""
     _require_windows()
+    _reject_when_packaged()
 
     try:
         packnine_cmd = _resolve_packnine_command()
@@ -378,6 +396,7 @@ def register() -> None:
 def unregister() -> None:
     """register()로 등록한 모든 것(메뉴, ProgID, 파일 연결)을 원상 복구한다."""
     _require_windows()
+    _reject_when_packaged()
 
     try:
         for parent in (r"Software\Classes\*", r"Software\Classes\Directory"):

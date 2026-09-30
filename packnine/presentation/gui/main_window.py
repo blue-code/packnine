@@ -481,8 +481,22 @@ class MainWindow(QMainWindow):
         PackNine을 "연결 프로그램" 목록에 등록한 뒤 Windows 기본 앱 설정을 열어 사용자가
         직접 지정하도록 안내한다.
         """
+        service = ContextMenuService()
+        if service.is_managed_by_windows():
+            # 스토어 설치본은 Windows가 패키지 정보로 파일 연결을 관리한다. 등록을 시도하면
+            # 가상 레지스트리에 써서 아무 효과가 없으므로, 오류가 아니라 안내로 처리한다.
+            QMessageBox.information(
+                self,
+                "파일 연결 설정",
+                "스토어에서 설치한 PackNine은 압축 파일 연결을 Windows가 자동으로 관리합니다.\n\n"
+                "더블클릭으로 항상 PackNine이 열리게 하려면 설정 > 앱 > 기본 앱에서 "
+                "PackNine을 지정하세요.",
+            )
+            QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))
+            return
+
         try:
-            ContextMenuService().register()
+            service.register()
         except Exception as exc:  # noqa: BLE001 - 등록 실패해도 안내는 이어간다
             self._show_error(exc)
             return
