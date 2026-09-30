@@ -22,9 +22,11 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QFrame,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -46,7 +48,9 @@ from packnine.application.update_service import UpdateService
 from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryError
 from packnine.domain.value_objects import DuplicatePolicy
+from packnine.application.recent_files_service import RecentFilesService
 from packnine.presentation.gui.image_viewer import ImageViewerDialog, is_image_name
+from packnine.presentation.gui.text_preview import is_text_name, read_text_preview
 from packnine.presentation.gui.widgets.archive_table import (
     ROLE_KIND,
     ROLE_PATH,
@@ -166,6 +170,7 @@ class MainWindow(QMainWindow):
 
         self._compress_service = CompressService()
         self._extract_service = ExtractService()
+        self._recent_files = RecentFilesService()
         self._inspect_service = InspectService()
         self._update_service = UpdateService()
 
@@ -236,7 +241,19 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
-        layout.addWidget(self._address_bar)
+        # 주소 표시줄 옆에 검색 상자를 둔다. 아카이브 전체를 이름으로 훑는다.
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("이름으로 찾기 (Ctrl+F)")
+        self._search_box.setClearButtonEnabled(True)
+        self._search_box.textChanged.connect(self._on_search_changed)
+        self._search_box.setMaximumWidth(320)
+
+        address_row = QHBoxLayout()
+        address_row.setContentsMargins(0, 0, 0, 0)
+        address_row.addWidget(self._address_bar, stretch=1)
+        address_row.addWidget(self._search_box)
+
+        layout.addLayout(address_row)
         layout.addWidget(splitter)
         self.setCentralWidget(container)
 
@@ -256,11 +273,19 @@ class MainWindow(QMainWindow):
         self._preview_image_label.setFrameShape(QFrame.Shape.StyledPanel)
         self._preview_image_label.setText("이미지를 선택하면 여기에 미리보기가 표시됩니다")
 
+        # 텍스트 파일은 그림이 아니라 내용을 보여준다(이미지 라벨과 교대로 표시).
+        self._preview_text = QPlainTextEdit()
+        self._preview_text.setReadOnly(True)
+        self._preview_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._preview_text.setMinimumHeight(140)
+        self._preview_text.hide()
+
         self._preview_caption = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         self._preview_caption.setWordWrap(True)
 
         layout.addWidget(title)
         layout.addWidget(self._preview_image_label, stretch=1)
+        layout.addWidget(self._preview_text, stretch=1)
         layout.addWidget(self._preview_caption)
         return panel
 
@@ -288,6 +313,12 @@ class MainWindow(QMainWindow):
         )
         self.action_extract.triggered.connect(self._on_extract)
         toolbar.addAction(self.action_extract)
+
+        self.action_extract_selected = QAction(
+            self._std_icon(QStyle.StandardPixmap.SP_DialogSaveButton), "선택 항목 풀기", self
+        )
+        self.action_extract_selected.triggered.connect(self._on_extract_selected)
+        toolbar.addAction(self.action_extract_selected)
 
         toolbar.addSeparator()
 
@@ -320,6 +351,8 @@ class MainWindow(QMainWindow):
 
         file_menu = menu_bar.addMenu("파일(&F)")
         file_menu.addAction(self.action_open)
+        self._recent_menu = file_menu.addMenu("최근 연 압축 파일(&R)")
+        self._rebuild_recent_menu()
         file_menu.addAction(self.action_compress)
         file_menu.addSeparator()
         action_quit = QAction("끝내기(&X)", self)
@@ -332,6 +365,12 @@ class MainWindow(QMainWindow):
 
         tool_menu = menu_bar.addMenu("도구(&T)")
         tool_menu.addAction(self.action_extract)
+        tool_menu.addAction(self.action_extract_selected)
+
+        action_find = QAction("찾기(&F)", self)
+        action_find.setShortcut("Ctrl+F")
+        action_find.triggered.connect(self._focus_search_box)
+        tool_menu.addAction(action_find)
         tool_menu.addAction(self.action_test)
         tool_menu.addSeparator()
         self.action_file_association = QAction("파일 연결 설정(&A)...", self)
@@ -602,6 +641,114 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 내부 헬퍼
     # ------------------------------------------------------------------
+    def _focus_search_box(self) -> None:
+        self._search_box.setFocus()
+        self._search_box.selectAll()
+
+    def _on_search_changed(self, _text: str) -> None:
+        """검색어가 바뀌면 목록을 다시 그린다(입력할 때마다 즉시 반영)."""
+        self._refresh_file_list()
+
+    def search_query(self) -> str:
+        # 위젯 생성 전에 _refresh_file_list가 불릴 수 있어 방어적으로 읽는다.
+        if not hasattr(self, "_search_box"):
+            return ""
+        return self._search_box.text().strip()
+
+    def _matching_entries(self, query: str) -> list[ArchiveEntry]:
+        """아카이브 전체에서 이름에 query가 포함된 파일 엔트리를 찾는다.
+
+        현재 폴더에 한정하지 않는다 - 깊은 폴더에 묻힌 파일을 찾는 것이 검색의 목적이라,
+        폴더별로 들어가며 찾게 하면 기능의 의미가 없다.
+        """
+        if self._current_manifest is None:
+            return []
+        lowered = query.lower()
+        return [
+            entry
+            for entry in self._current_manifest.entries
+            if not entry.is_dir and lowered in entry.name.lower()
+        ]
+
+    def _expand_to_entry_names(self, paths: list[str]) -> list[str]:
+        """선택 경로(파일 또는 폴더)를 실제 엔트리 이름 목록으로 펼친다.
+
+        폴더를 고르면 그 하위 엔트리를 모두 포함한다. 폴더와 그 안의 파일을 함께 골라도
+        같은 엔트리가 두 번 들어가지 않도록 순서를 유지한 채 접는다.
+        """
+        if self._current_manifest is None:
+            return []
+        names: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            prefix = f"{path}/"
+            for entry in self._current_manifest.entries:
+                if entry.name == path or entry.name.startswith(prefix):
+                    if entry.name not in seen:
+                        seen.add(entry.name)
+                        names.append(entry.name)
+        return names
+
+    def _on_extract_selected(self) -> None:
+        """선택한 항목만 지정한 폴더에 푼다(전체 해제와 별개)."""
+        if self._current_archive_path is None:
+            QMessageBox.information(self, "안내", "먼저 아카이브를 열어주세요.")
+            return
+        entry_names = self._expand_to_entry_names(self._selected_entry_paths())
+        if not entry_names:
+            QMessageBox.information(self, "안내", "풀어낼 항목을 먼저 선택해주세요.")
+            return
+
+        destination_str = QFileDialog.getExistingDirectory(self, "선택 항목을 풀 폴더 선택")
+        if not destination_str:
+            return
+        destination = pathlib.Path(destination_str)
+
+        progress = self._make_progress_dialog("선택 항목 푸는 중...")
+        try:
+            completed = self._execute_with_password_retry(
+                lambda password: self._extract_service.extract_entries(
+                    self._current_archive_path, entry_names, destination, password=password
+                )
+            )
+        except UnsafeArchiveEntryError as exc:
+            self._show_security_warning(exc)
+        except Exception as exc:  # noqa: BLE001 - 크래시 대신 메시지로 알린다
+            self._show_error(exc)
+        else:
+            if completed:
+                QMessageBox.information(
+                    self, "완료", f"{len(entry_names)}개 항목을 풀었습니다: {destination}"
+                )
+        finally:
+            progress.close()
+
+    def _rebuild_recent_menu(self) -> None:
+        """파일 > 최근 연 압축 파일 메뉴를 다시 채운다."""
+        if not hasattr(self, "_recent_menu"):
+            return
+        self._recent_menu.clear()
+        paths = self._recent_files.list_recent()
+        if not paths:
+            empty = QAction("(없음)", self)
+            empty.setEnabled(False)
+            self._recent_menu.addAction(empty)
+            return
+        for path in paths:
+            action = QAction(path.name, self)
+            action.setToolTip(str(path))
+            # 기본 인자로 값을 묶어야 반복문 마지막 경로만 열리는 실수를 피한다.
+            action.triggered.connect(lambda _checked=False, p=path: self._open_archive(p))
+            self._recent_menu.addAction(action)
+        self._recent_menu.addSeparator()
+        clear_action = QAction("목록 지우기", self)
+        clear_action.triggered.connect(self._on_clear_recent)
+        self._recent_menu.addAction(clear_action)
+
+    def _on_clear_recent(self) -> None:
+        self._recent_files.clear()
+        self._rebuild_recent_menu()
+
     def _selected_entry_paths(self) -> list[str]:
         """선택된 행들의 아카이브 내부 전체 경로 목록을 반환한다('..' 행은 제외)."""
         paths: list[str] = []
@@ -675,7 +822,12 @@ class MainWindow(QMainWindow):
                 return
             self._current_archive_path = archive_path
             self.setWindowTitle(f"{archive_path.name} - PackNine")
+            # 새 아카이브를 열면 이전 검색어는 의미가 없으므로 비운다.
+            if hasattr(self, "_search_box"):
+                self._search_box.clear()
             self._populate_table(manifest)
+            self._recent_files.remember(archive_path)
+            self._rebuild_recent_menu()
 
     def _prompt_password(self) -> str | None:
         """비밀번호 입력 다이얼로그를 띄운다. 취소하면 None을 반환한다."""
@@ -762,18 +914,28 @@ class MainWindow(QMainWindow):
             self._address_bar.clear()
             return
 
-        subfolders, files = _direct_children(self._current_manifest.entries, self._current_folder)
+        query = self.search_query()
 
         # 채우는 동안 정렬이 켜져 있으면 행이 삽입 즉시 재배열되어 데이터가 섞이므로
         # 반드시 끄고 채운 뒤 다시 켠다(Qt 표준 패턴).
         self._table.setSortingEnabled(False)
         rows: list[tuple[str, str, ArchiveEntry | None]] = []
-        if self._current_folder:
-            rows.append(("..", "up", None))
-        for folder_name in subfolders:
-            rows.append((folder_name, "folder", None))
-        for entry in files:
-            rows.append((entry.name.rsplit("/", 1)[-1], "file", entry))
+
+        if query:
+            # 검색 중에는 폴더 탐색을 잠시 멈추고, 아카이브 전체에서 찾은 결과를
+            # 전체 경로와 함께 평면으로 보여준다.
+            for entry in self._matching_entries(query):
+                rows.append((entry.name, "file", entry))
+        else:
+            subfolders, files = _direct_children(
+                self._current_manifest.entries, self._current_folder
+            )
+            if self._current_folder:
+                rows.append(("..", "up", None))
+            for folder_name in subfolders:
+                rows.append((folder_name, "folder", None))
+            for entry in files:
+                rows.append((entry.name.rsplit("/", 1)[-1], "file", entry))
 
         # 그룹 우선순위: '..'(0) → 폴더(1) → 파일(2). 어떤 칼럼으로 정렬해도 유지된다.
         _GROUP = {"up": 0, "folder": 1, "file": 2}
@@ -824,10 +986,16 @@ class MainWindow(QMainWindow):
         self._table.sortItems(0, Qt.SortOrder.AscendingOrder)
 
         archive_name = self._current_archive_path.name if self._current_archive_path else ""
-        folder_display = self._current_folder.replace("/", "\\")
-        self._address_bar.setText(
-            f"{archive_name}\\{folder_display}" if folder_display else archive_name
-        )
+        if self.search_query():
+            # 검색 중에는 현재 폴더 경로 대신 결과 개수를 보여준다.
+            self._address_bar.setText(
+                f"{archive_name} — '{self.search_query()}' 검색 결과 {self._table.rowCount()}개"
+            )
+        else:
+            folder_display = self._current_folder.replace("/", "\\")
+            self._address_bar.setText(
+                f"{archive_name}\\{folder_display}" if folder_display else archive_name
+            )
         # 폴더를 새로 채우면 선택이 사라지므로 미리보기도 비운다.
         self._clear_preview()
         self._update_status_bar()
@@ -864,13 +1032,52 @@ class MainWindow(QMainWindow):
 
     def _update_preview(self) -> None:
         entry = self._single_selected_file_entry()
-        if entry is None or not is_image_name(entry.name):
+        if entry is None or not (is_image_name(entry.name) or is_text_name(entry.name)):
             self._clear_preview()
             return
         # 같은 항목을 다시 선택한 경우 재추출하지 않는다.
         if entry.name == self._preview_entry_name:
             return
-        self._show_image_preview(entry)
+        if is_image_name(entry.name):
+            self._show_image_preview(entry)
+        else:
+            self._show_text_preview(entry)
+
+    def _show_text_preview(self, entry: ArchiveEntry) -> None:
+        """텍스트 파일 내용을 앞부분만 꺼내 미리보기 패널에 보여준다."""
+        assert self._current_archive_path is not None
+        self._cleanup_preview_temp()
+        temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="packnine_textview_"))
+        try:
+            # 이미지 미리보기와 같은 이유로, 아는 비밀번호로만 조용히 시도한다.
+            self._extract_service.extract_entries(
+                self._current_archive_path,
+                [entry.name],
+                temp_dir,
+                password=self._current_password,
+            )
+        except Exception:  # noqa: BLE001 - 미리보기 실패가 앱을 방해하면 안 된다
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self._clear_preview()
+            return
+
+        target = temp_dir.joinpath(*pathlib.PurePosixPath(entry.name).parts)
+        text = read_text_preview(target)
+        if text is None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self._clear_preview()
+            return
+
+        self._preview_temp_dir = temp_dir
+        self._preview_entry_name = entry.name
+        self._preview_pixmap = None
+        # 직전 이미지가 라벨에 남아 있으면 다시 이미지로 돌아갈 때 잠깐 옛 그림이 보인다.
+        self._preview_image_label.setPixmap(QPixmap())
+        self._preview_image_label.hide()
+        self._preview_text.setPlainText(text)
+        self._preview_text.show()
+        display_name = entry.name.rsplit("/", 1)[-1]
+        self._preview_caption.setText(f"{display_name} · {entry.size:,} bytes")
 
     def _show_image_preview(self, entry: ArchiveEntry) -> None:
         assert self._current_archive_path is not None
@@ -893,6 +1100,8 @@ class MainWindow(QMainWindow):
 
         self._preview_temp_dir = temp_dir
         self._preview_entry_name = entry.name
+        self._preview_text.hide()
+        self._preview_image_label.show()
         image_path = temp_dir.joinpath(*pathlib.PurePosixPath(entry.name).parts)
         self._preview_pixmap = QPixmap(str(image_path))
         self._render_preview()
@@ -925,8 +1134,11 @@ class MainWindow(QMainWindow):
     def _clear_preview(self) -> None:
         self._preview_pixmap = None
         self._preview_entry_name = None
+        self._preview_text.clear()
+        self._preview_text.hide()
+        self._preview_image_label.show()
         self._preview_image_label.setPixmap(QPixmap())
-        self._preview_image_label.setText("이미지를 선택하면 여기에 미리보기가 표시됩니다")
+        self._preview_image_label.setText("이미지나 텍스트 파일을 선택하면 여기에 미리보기가 표시됩니다")
         self._preview_caption.setText("")
         self._cleanup_preview_temp()
 

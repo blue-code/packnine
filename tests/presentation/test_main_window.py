@@ -288,7 +288,7 @@ def test_selecting_non_image_clears_preview(qtbot, tmp_path):
     qtbot.wait(100)
     assert not window._preview_image_label.pixmap().isNull()
 
-    # 텍스트 파일 선택 → 미리보기 비움
+    # 텍스트 파일 선택 → 이미지는 비우고 내용 미리보기로 전환
     txt_row = next(
         r for r in range(window._table.rowCount())
         if window._table.item(r, 0).text() == "notes.txt"
@@ -297,6 +297,8 @@ def test_selecting_non_image_clears_preview(qtbot, tmp_path):
     qtbot.wait(100)
     pm = window._preview_image_label.pixmap()
     assert pm is None or pm.isNull()
+    assert window._preview_text.isVisible()
+    assert window._preview_text.toPlainText() != ""
 
 
 def test_table_sorts_size_column_numerically(qtbot, tmp_path):
@@ -626,3 +628,129 @@ def test_file_association_menu_informs_instead_of_failing_when_packaged(
 
     assert errors == []
     assert len(shown) == 1 and "Windows가 자동으로 관리" in shown[0]
+
+
+def _archive_with_tree(tmp_path):
+    """검색/선택 해제 테스트용 아카이브를 만든다(하위 폴더 포함)."""
+    from packnine.application.compress_service import CompressService
+
+    src = tmp_path / "자료"
+    (src / "문서").mkdir(parents=True)
+    (src / "사진").mkdir(parents=True)
+    (src / "문서" / "보고서.txt").write_text("보고서 내용 " * 30, encoding="utf-8")
+    (src / "문서" / "메모.txt").write_text("메모 내용 " * 30, encoding="utf-8")
+    (src / "사진" / "보고서_사진.txt").write_text("사진 설명 " * 30, encoding="utf-8")
+    archive = tmp_path / "tree.zip"
+    CompressService().compress([src], archive)
+    return archive
+
+
+def test_search_finds_entries_across_all_folders(qtbot, tmp_path):
+    # 검색의 목적은 깊은 폴더에 묻힌 파일을 찾는 것이라 현재 폴더에 한정하면 안 된다.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(_archive_with_tree(tmp_path))
+
+    window._search_box.setText("보고서")
+    qtbot.wait(50)
+
+    names = {window._table.item(r, 0).text() for r in range(window._table.rowCount())}
+    assert names == {"자료/문서/보고서.txt", "자료/사진/보고서_사진.txt"}
+
+
+def test_search_is_case_insensitive_and_clearing_restores_folder_view(qtbot, tmp_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(_archive_with_tree(tmp_path))
+    before = {window._table.item(r, 0).text() for r in range(window._table.rowCount())}
+
+    window._search_box.setText("BOGOSEO")  # 매칭 없음
+    qtbot.wait(50)
+    assert window._table.rowCount() == 0
+
+    window._search_box.clear()
+    qtbot.wait(50)
+    after = {window._table.item(r, 0).text() for r in range(window._table.rowCount())}
+    assert after == before
+
+
+def test_search_result_count_shown_in_address_bar(qtbot, tmp_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(_archive_with_tree(tmp_path))
+
+    window._search_box.setText("메모")
+    qtbot.wait(50)
+
+    assert "검색 결과 1개" in window._address_bar.text()
+
+
+def test_extract_selected_writes_only_chosen_entries(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(_archive_with_tree(tmp_path))
+    window._navigate_to("자료/문서")
+    qtbot.wait(50)
+
+    row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == "메모.txt"
+    )
+    window._table.selectRow(row)
+
+    destination = tmp_path / "out"
+    destination.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(destination)
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    window._on_extract_selected()
+
+    assert (destination / "자료" / "문서" / "메모.txt").exists()
+    # 고르지 않은 항목은 나오면 안 된다.
+    assert not (destination / "자료" / "문서" / "보고서.txt").exists()
+
+
+def test_extract_selected_expands_folder_selection(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_archive(_archive_with_tree(tmp_path))
+    window._navigate_to("자료")
+    qtbot.wait(50)
+
+    row = next(
+        r for r in range(window._table.rowCount())
+        if window._table.item(r, 0).text() == "사진"
+    )
+    window._table.selectRow(row)
+
+    destination = tmp_path / "out2"
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(destination)
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    window._on_extract_selected()
+
+    assert (destination / "자료" / "사진" / "보고서_사진.txt").exists()
+
+
+def test_opening_archive_records_it_in_recent_menu(qtbot, tmp_path, monkeypatch):
+    from packnine.infrastructure import recent_files
+
+    store = tmp_path / "recent.json"
+    monkeypatch.setattr(recent_files, "_default_store_path", lambda: store)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    archive = _archive_with_tree(tmp_path)
+    window._open_archive(archive)
+
+    assert recent_files.load(store_path=store) == [archive]
+    labels = [a.text() for a in window._recent_menu.actions()]
+    assert archive.name in labels
