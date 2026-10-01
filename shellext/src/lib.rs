@@ -18,6 +18,8 @@
 //! 압축 로직은 전부 파이썬 쪽에 있고, 여기서는 아무 파일도 읽거나 쓰지 않는다 - 탐색기
 //! 프로세스 안에서 도는 코드이므로 최대한 얇게 유지해 장애 지점을 줄인다.
 
+mod preview;
+
 use std::cell::Cell;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
@@ -37,6 +39,14 @@ static mut DLL_MODULE: HMODULE = HMODULE(std::ptr::null_mut());
 
 /// 살아 있는 COM 객체 수. 0이 되어야 탐색기가 DLL을 내려도 안전하다.
 static OBJECT_COUNT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub(crate) fn object_added() {
+    OBJECT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn object_removed() {
+    OBJECT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// 메뉴에 올라가는 명령 종류. 루트 하나와 그 아래 동작들로 나뉜다.
 #[derive(Clone, Copy, PartialEq)]
@@ -285,8 +295,17 @@ impl IEnumExplorerCommand_Impl for SubCommandEnum_Impl {
     }
 }
 
+/// 이 팩토리가 만들어 줄 객체 종류.
+#[derive(Clone, Copy)]
+enum FactoryKind {
+    /// 우클릭 메뉴 핸들러.
+    ContextMenu,
+    /// 탐색기 미리보기 창 핸들러.
+    Preview,
+}
+
 #[implement(IClassFactory)]
-struct CommandFactory;
+struct CommandFactory(FactoryKind);
 
 impl IClassFactory_Impl for CommandFactory_Impl {
     fn CreateInstance(
@@ -298,9 +317,17 @@ impl IClassFactory_Impl for CommandFactory_Impl {
         if outer.is_some() {
             return Err(Error::from(CLASS_E_NOAGGREGATION));
         }
-        // 탐색기가 만드는 것은 언제나 묶음(루트)이고, 하위 항목은 EnumSubCommands가 준다.
-        let command: IExplorerCommand = PackNineCommand::new(CommandKind::Root).into();
-        unsafe { command.query(iid, object).ok() }
+        match self.0 {
+            FactoryKind::ContextMenu => {
+                // 탐색기가 만드는 것은 언제나 묶음(루트)이고, 하위 항목은 EnumSubCommands가 준다.
+                let command: IExplorerCommand = PackNineCommand::new(CommandKind::Root).into();
+                unsafe { command.query(iid, object).ok() }
+            }
+            FactoryKind::Preview => {
+                let handler: IPreviewHandler = preview::ArchivePreviewHandler::new().into();
+                unsafe { handler.query(iid, object).ok() }
+            }
+        }
     }
 
     fn LockServer(&self, lock: BOOL) -> Result<()> {
@@ -323,10 +350,14 @@ pub unsafe extern "system" fn DllGetClassObject(
     if clsid.is_null() || iid.is_null() || object.is_null() {
         return E_INVALIDARG;
     }
-    if *clsid != CLSID_PACKNINE_COMPRESS {
+    let kind = if *clsid == CLSID_PACKNINE_COMPRESS {
+        FactoryKind::ContextMenu
+    } else if *clsid == preview::CLSID_PACKNINE_PREVIEW {
+        FactoryKind::Preview
+    } else {
         return CLASS_E_CLASSNOTAVAILABLE;
-    }
-    let factory: IClassFactory = CommandFactory.into();
+    };
+    let factory: IClassFactory = CommandFactory(kind).into();
     factory.query(iid, object)
 }
 

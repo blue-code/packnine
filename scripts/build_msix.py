@@ -37,6 +37,8 @@ PUBLISHER_DISPLAY_NAME = "수카버스"
 # 탐색기 컨텍스트 메뉴 핸들러(shellext)의 CLSID. Rust 쪽 lib.rs의 값과 반드시 같아야 한다.
 SHELL_EXTENSION_CLSID = "D1C9C67D-CF0A-494E-9E84-4FEDB96D2272"
 SHELL_EXTENSION_DLL = "packnine_shellext.dll"
+# 탐색기 미리보기 창 핸들러의 CLSID. Rust 쪽 preview.rs의 값과 반드시 같아야 한다.
+PREVIEW_HANDLER_CLSID = "D400F75F-2A57-4259-B4FC-9AF59272AFE8"
 
 _DIST_DIR = _PROJECT_ROOT / "dist"
 _LAYOUT_DIR = _DIST_DIR / "msix-layout"
@@ -83,7 +85,8 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
   xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
   xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
-  IgnorableNamespaces="uap uap2 uap3 rescap com desktop4 desktop5">
+  xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
+  IgnorableNamespaces="uap uap2 uap3 rescap com desktop2 desktop4 desktop5">
 
   <Identity
     Name="{IDENTITY_NAME}"
@@ -122,6 +125,7 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
           <com:ComServer>
             <com:SurrogateServer DisplayName="PackNine Shell Extension">
               <com:Class Id="{SHELL_EXTENSION_CLSID}" Path="{SHELL_EXTENSION_DLL}" ThreadingModel="STA" />
+              <com:Class Id="{PREVIEW_HANDLER_CLSID}" Path="{SHELL_EXTENSION_DLL}" ThreadingModel="STA" />
             </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>
@@ -148,6 +152,8 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
             <uap:SupportedFileTypes>
 {file_types}
             </uap:SupportedFileTypes>
+            <!-- 탐색기 미리보기 창에 압축 파일 내용을 보여준다(zip만 목록 표시). -->
+            <desktop2:DesktopPreviewHandler Clsid="{PREVIEW_HANDLER_CLSID}" />
           </uap3:FileTypeAssociation>
         </uap3:Extension>
       </Extensions>

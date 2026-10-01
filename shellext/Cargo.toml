@@ -1,13 +1,13 @@
 [package]
 name = "packnine_shellext"
-version = "0.11.1"
+version = "0.11.2"
 edition = "2021"
 description = "PackNine Windows 11 탐색기 컨텍스트 메뉴 핸들러 (IExplorerCommand)"
 license = "MIT"
 
 [lib]
 name = "packnine_shellext"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies.windows]
 version = "0.58"
@@ -23,10 +23,18 @@ features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Ole",
 ]
 
 [dependencies]
 windows-core = "0.58"
+# 미리보기 창에 압축 파일 목록을 보여주기 위한 zip 리더.
+# 직접 파싱하지 않고 검증된 크레이트에 맡긴다(SECURITY.md 6번과 같은 취지).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = "z"
