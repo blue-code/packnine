@@ -164,6 +164,21 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
 """
 
 
+def _clean_alpha(image):
+    """거의 투명한 픽셀의 색을 지운다(작업 표시줄 타일 모서리에 색이 비치는 것 방지).
+
+    둥근 모서리를 작게 줄이면 알파가 한 자리 수인 색 픽셀이 남아, 렌더링 경로에 따라
+    네 귀퉁이에 점이 찍힌 것처럼 보인다. generate_icon.py와 같은 처리를 한다.
+    """
+    pixels = image.load()
+    width, height = image.size
+    for y in range(height):
+        for x in range(width):
+            if pixels[x, y][3] < 16:
+                pixels[x, y] = (0, 0, 0, 0)
+    return image
+
+
 def _generate_assets(assets_dir: pathlib.Path) -> None:
     from PIL import Image
 
@@ -177,7 +192,7 @@ def _generate_assets(assets_dir: pathlib.Path) -> None:
             tile.paste(icon, (80, 0), icon)
             tile.save(assets_dir / name)
             continue
-        source.resize((size, size), Image.LANCZOS).save(assets_dir / name)
+        _clean_alpha(source.resize((size, size), Image.LANCZOS)).save(assets_dir / name)
 
 
 def _find_makeappx() -> pathlib.Path:
@@ -191,16 +206,25 @@ def _find_makeappx() -> pathlib.Path:
 
 
 def main() -> int:
-    exe_path = _DIST_DIR / "PackNine.exe"
+    # 폴더(onedir) 빌드를 쓴다. 단일 파일은 실행마다 54MB를 임시 폴더에 풀어내 기동에만
+    # 2초 넘게 걸리는데, 우클릭 "알아서 풀기"처럼 짧은 작업에서는 그 시간이 체감 속도를
+    # 지배한다(실측 2081ms -> 260ms).
+    onedir_path = _DIST_DIR / "PackNine"
+    exe_path = onedir_path / "PackNine.exe"
     if not exe_path.exists():
-        print(f"먼저 실행 파일을 빌드하세요: {exe_path}", file=sys.stderr)
+        print(
+            f"먼저 폴더 모드로 빌드하세요: {exe_path}\n"
+            "  python -m PyInstaller packnine.onedir.spec --noconfirm",
+            file=sys.stderr,
+        )
         return 1
 
     version = read_version()
     shutil.rmtree(_LAYOUT_DIR, ignore_errors=True)
     _LAYOUT_DIR.mkdir(parents=True)
 
-    shutil.copy2(exe_path, _LAYOUT_DIR / "PackNine.exe")
+    # 폴더 전체를 패키지 루트에 펼쳐 담는다(exe와 _internal 등).
+    shutil.copytree(onedir_path, _LAYOUT_DIR, dirs_exist_ok=True)
     if not _SHELLEXT_DLL_PATH.exists():
         print(
             f"셸 확장 DLL이 없습니다: {_SHELLEXT_DLL_PATH}\n"

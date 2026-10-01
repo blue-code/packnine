@@ -5,10 +5,12 @@
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QInputDialog,
@@ -18,6 +20,20 @@ from PySide6.QtWidgets import (
 )
 
 from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryError
+
+# 우클릭 메뉴로 실행되는 경로는 MainWindow를 거치지 않아 앱 아이콘이 설정되지 않는다.
+# 그대로 두면 진행률 창과 작업 표시줄에 기본 아이콘이 뜬다.
+_ICON_PATH = pathlib.Path(__file__).resolve().parent / "assets" / "icon.ico"
+
+
+def _ensure_app(argv: list[str]) -> QApplication:
+    """QApplication을 얻고(없으면 만들고) 앱 아이콘을 보장한다."""
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(argv)
+    if app.windowIcon().isNull() and _ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(_ICON_PATH)))
+    return app
 
 
 def run_with_progress(title: str, operation: Callable[[Callable], None]) -> bool:
@@ -29,9 +45,7 @@ def run_with_progress(title: str, operation: Callable[[Callable], None]) -> bool
       사용자가 취소할 여지를 주지 않아도 되기 때문이다.
     - 실패 시에만 다이얼로그를 띄우고 False를 반환한다. 성공 팝업은 없다.
     """
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
+    _ensure_app(sys.argv)
 
     progress = QProgressDialog(title, None, 0, 100)
     progress.setWindowModality(Qt.WindowModality.WindowModal)
@@ -75,9 +89,7 @@ def run_extract_with_password_retry(
     다이얼로그를 띄워 재시도한다(우클릭 "압축풀기"로 암호 zip을 만난 사용자가
     입력 기회를 얻지 못하고 실패만 보는 문제 방지). 입력을 취소하면 조용히 중단한다.
     """
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
+    _ensure_app(sys.argv)
 
     password = initial_password
     while True:

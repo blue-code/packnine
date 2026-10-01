@@ -102,6 +102,24 @@ def _load_font(px_size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default(size=px_size)
 
 
+def _clean_alpha(image: Image.Image) -> Image.Image:
+    """거의 투명한 픽셀을 완전 투명으로 만들고 그 자리의 색을 지운다.
+
+    둥근 모서리를 작은 크기로 줄이면 모서리에 알파가 3 정도인 색 픽셀이 남는다.
+    이런 픽셀은 렌더링 경로에 따라 색이 비쳐 보여서, 작업 표시줄 아이콘 네 귀퉁이에
+    점이 찍힌 것처럼 나타난다. 투명한 자리에는 색을 남기지 않는 것이 안전하다.
+    """
+    cleaned = image.convert("RGBA")
+    pixels = cleaned.load()
+    width, height = cleaned.size
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = pixels[x, y]
+            if a < 16:
+                pixels[x, y] = (0, 0, 0, 0)
+    return cleaned
+
+
 def generate() -> pathlib.Path:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     canvas = _rounded_gradient_background(CANVAS)
@@ -112,7 +130,15 @@ def generate() -> pathlib.Path:
 
     ico_path = ASSETS_DIR / "icon.ico"
     ico_sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    canvas.save(ico_path, format="ICO", sizes=ico_sizes)
+    # 크기별로 직접 줄이고 모서리를 정리한 뒤 넣는다. Pillow에 축소를 맡기면
+    # 작은 크기에서 모서리에 반투명 색 픽셀이 남는다.
+    #
+    # 기준 이미지는 반드시 원본 캔버스여야 한다. Pillow는 기준 이미지보다 큰 크기를
+    # 목록에서 버리므로, 16x16을 기준으로 주면 16x16짜리 아이콘 하나만 저장된다.
+    frames = [_clean_alpha(canvas.resize(size, Image.LANCZOS)) for size in ico_sizes]
+    _clean_alpha(canvas).save(
+        ico_path, format="ICO", sizes=ico_sizes, append_images=frames
+    )
 
     icns_path = ASSETS_DIR / "icon.icns"
     icns_sizes = [(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)]
