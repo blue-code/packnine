@@ -468,37 +468,24 @@ def _cmd_compress_dialog(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def _reveal_in_explorer(target: pathlib.Path) -> None:
-    """해제된 항목을 탐색기에서 '선택된 상태'로 열어 어디에 풀렸는지 바로 보이게 한다.
+def _open_extracted_folder(folder: pathlib.Path) -> None:
+    """압축이 풀린 폴더를 탐색기로 연다.
 
-    콘솔 없는(탐색기 우클릭) 실행에서는 성공해도 아무것도 안 보여서 "반응이 없다"거나
-    "풀린 파일을 못 찾겠다"고 느껴지던 문제를 해소한다. 단순히 폴더만 열면 이미 열려
-    있던 폴더일 때 새 창이 안 떠 티가 안 나므로, explorer /select로 그 항목의 부모
-    폴더를 열고 항목을 선택 표시한다(반디집이 푼 폴더를 보여주는 것과 같은 취지).
+    예전에는 `explorer /select`로 부모 폴더를 열고 항목을 선택 표시했는데, 새 폴더를
+    만들지 않은 경우에는 "보고 있던 폴더가 그냥 다시 뜨는" 꼴이라 거슬린다는 지적이
+    있었다. 이제 호출자가 "새로 만들어진 폴더"일 때만 부르고, 여기서는 그 폴더 자체를
+    연다 - 풀린 결과가 바로 보인다.
+
     실패는 치명적이 아니므로 조용히 넘어간다(비-Windows에는 explorer가 없다).
     """
     try:
-        target = pathlib.Path(target)
-        if not target.exists():
+        folder = pathlib.Path(folder)
+        if not folder.is_dir():
             return
         # explorer.exe는 성공해도 0이 아닌 코드를 반환하므로 check=False가 필수다.
-        subprocess.run(["explorer", f"/select,{target}"], check=False)  # noqa: S603,S607
+        subprocess.run(["explorer", str(folder)], check=False)  # noqa: S603,S607
     except (OSError, ValueError):
         pass
-
-
-def _extracted_top_item(destination: pathlib.Path, manifest) -> pathlib.Path:
-    """해제 결과에서 사용자에게 보여줄 대표 항목(최상위 항목 하나)의 경로를 고른다.
-
-    최상위가 여러 개면 아카이브명 하위 폴더 안의 항목을, 하나면 그 항목을 가리킨다.
-    실제 디스크에 존재하는 첫 항목을 반환하고, 없으면 destination 자체로 대체한다.
-    """
-    for entry in manifest.entries:
-        top = entry.name.replace("\\", "/").split("/", 1)[0]
-        candidate = destination / top
-        if candidate.exists():
-            return candidate
-    return destination
 
 
 def _resolve_extract_destination(
@@ -554,9 +541,12 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
             # 나머지는 계속 진행한다. 암호 아카이브면 비밀번호 입력을 받아 재시도한다.
             captured: dict[str, pathlib.Path] = {}
 
-            def operation_with_password(on_progress, password, _capture=captured):
-                destination, manifest = _run_extract(password, on_progress)
-                _capture["target"] = _extracted_top_item(destination, manifest)
+            def operation_with_password(on_progress, password, _capture=captured, _base=base_destination):
+                destination, _ = _run_extract(password, on_progress)
+                # 해제가 새 폴더를 만들었을 때만 열어 보여준다. 제자리에 풀었다면
+                # 사용자가 이미 보고 있는 폴더라 다시 띄울 이유가 없다.
+                if destination != _base:
+                    _capture["target"] = destination
 
             ok = quick_progress.run_extract_with_password_retry(
                 f"압축 해제 중: {archive_path.name}",
@@ -600,7 +590,7 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
             seen.add(key)
             unique_targets.append(target)
     for target in unique_targets[:_MAX_REVEAL_WINDOWS]:
-        _reveal_in_explorer(target)
+        _open_extracted_folder(target)
 
     return 1 if had_failure else 0
 

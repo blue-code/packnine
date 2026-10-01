@@ -46,13 +46,23 @@ _OUTPUT_MSIX = _DIST_DIR / "PackNine.msix"
 _SOURCE_ICON = _PROJECT_ROOT / "packnine" / "presentation" / "gui" / "assets" / "icon_256.png"
 _SHELLEXT_DLL_PATH = _PROJECT_ROOT / "shellext" / "target" / "release" / SHELL_EXTENSION_DLL
 
+# 작업 표시줄·시작 메뉴가 고를 수 있는 unplated 크기들.
+#
+# unplated 자산이 없으면 Windows는 Square44x44Logo를 가져다 "판(plate)" 위에 얹는데,
+# 그 판 색이 로고의 둥근 모서리 바깥으로 비쳐 네 귀퉁이에 색이 찍힌 것처럼 보인다
+# (실제로 빨간 판이 깔려 모서리가 빨갛게 보이는 증상이 있었다). 쓰일 만한 크기를
+# 모두 넣어 두면 Windows가 판을 쓰지 않고 로고를 그대로 그린다.
+_UNPLATED_SIZES = (16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256)
+
 # 스토어가 요구하는 최소 타일 자산. 값은 (파일명, 한 변 픽셀).
 _ASSET_SIZES = (
     ("Square44x44Logo.png", 44),
-    ("Square44x44Logo.targetsize-24_altform-unplated.png", 24),
     ("Square150x150Logo.png", 150),
     ("StoreLogo.png", 50),
     ("Wide310x150Logo.png", 0),  # 0은 가로형(310x150)을 뜻한다 - 아래에서 따로 처리한다.
+) + tuple(
+    (f"Square44x44Logo.targetsize-{size}_altform-unplated.png", size)
+    for size in _UNPLATED_SIZES
 )
 
 
@@ -114,7 +124,7 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
         Description="ZIP/7Z/TAR/RAR을 지원하는 오픈소스 압축 프로그램"
         Square150x150Logo="Assets\\Square150x150Logo.png"
         Square44x44Logo="Assets\\Square44x44Logo.png"
-        BackgroundColor="transparent">
+        BackgroundColor="#4F46E5">
         <uap:DefaultTile Wide310x150Logo="Assets\\Wide310x150Logo.png" />
       </uap:VisualElements>
       <Extensions>

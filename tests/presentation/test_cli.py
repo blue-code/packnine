@@ -225,10 +225,9 @@ def test_smart_compress_works_without_console(tmp_path, monkeypatch):
     assert calls == ["압축 중..."]
 
 
-def test_smart_extract_without_console_reveals_extracted_item(tmp_path, monkeypatch):
-    # 탐색기 우클릭(콘솔 없음)으로 "알아서 풀기" 성공 시, 해제된 항목을 탐색기에서
-    # 선택된 상태로 열어 어디에 풀렸는지 바로 보이게 해야 한다(이전에는 진행률 창만
-    # 깜빡이고 아무것도 안 보여서 "안 된다"고 느껴졌음).
+def test_smart_extract_in_place_does_not_open_explorer(tmp_path, monkeypatch):
+    # 제자리에 풀었다면(새 폴더를 만들지 않았다면) 탐색기를 띄우지 않는다.
+    # 사용자가 이미 보고 있는 폴더를 다시 띄우는 꼴이라 거슬린다는 지적을 반영한 것.
     import pathlib
 
     monkeypatch.setattr("sys.stdout", None)
@@ -250,7 +249,7 @@ def test_smart_extract_without_console_reveals_extracted_item(tmp_path, monkeypa
     )
     revealed: list = []
     monkeypatch.setattr(
-        "packnine.presentation.cli._reveal_in_explorer",
+        "packnine.presentation.cli._open_extracted_folder",
         lambda p: revealed.append(pathlib.Path(p)),
     )
 
@@ -259,13 +258,13 @@ def test_smart_extract_without_console_reveals_extracted_item(tmp_path, monkeypa
     assert exit_code == 0
     # 최상위 폴더가 하나(proj/)라 아카이브와 같은 폴더에 그대로 풀린다.
     assert (tmp_path / "proj" / "f.txt").exists()
-    # 해제된 최상위 항목(proj 폴더)이 선택된 상태로 열려야 한다.
-    assert revealed == [tmp_path / "proj"]
+    # 새 폴더를 만들지 않았으므로 탐색기를 띄우지 않는다.
+    assert revealed == []
 
 
-def test_smart_extract_multi_top_reveals_created_subfolder(tmp_path, monkeypatch):
+def test_smart_extract_opens_newly_created_folder(tmp_path, monkeypatch):
     # 최상위 항목이 여러 개면 "알아서 풀기"는 아카이브명 하위 폴더를 만들어 푼다.
-    # 그 안의 항목을 선택해 열어, 하위 폴더가 생긴 것을 사용자가 바로 알 수 있게 한다.
+    # 새로 생긴 그 폴더를 열어, 어디에 풀렸는지 바로 보이게 한다.
     import pathlib
 
     monkeypatch.setattr("sys.stdout", None)
@@ -287,7 +286,7 @@ def test_smart_extract_multi_top_reveals_created_subfolder(tmp_path, monkeypatch
     )
     revealed: list = []
     monkeypatch.setattr(
-        "packnine.presentation.cli._reveal_in_explorer",
+        "packnine.presentation.cli._open_extracted_folder",
         lambda p: revealed.append(pathlib.Path(p)),
     )
 
@@ -296,9 +295,8 @@ def test_smart_extract_multi_top_reveals_created_subfolder(tmp_path, monkeypatch
     assert exit_code == 0
     # 최상위가 여러 개라 bundle/ 하위 폴더에 풀린다.
     assert (tmp_path / "bundle" / "a.txt").exists()
-    # 그 하위 폴더 안의 항목이 선택된 채 열려야 한다(부모=bundle 폴더가 보임).
-    assert len(revealed) == 1
-    assert revealed[0].parent == tmp_path / "bundle"
+    # 새로 만들어진 그 폴더가 열려야 한다.
+    assert revealed == [tmp_path / "bundle"]
 
 
 def test_open_command_launches_gui_with_archive(monkeypatch, tmp_path):
