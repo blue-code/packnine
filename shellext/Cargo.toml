@@ -1,6 +1,6 @@
 [package]
 name = "packnine_shellext"
-version = "0.11.4"
+version = "0.11.5"
 edition = "2021"
 description = "PackNine Windows 11 탐색기 컨텍스트 메뉴 핸들러 (IExplorerCommand)"
 license = "MIT"

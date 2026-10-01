@@ -18,6 +18,7 @@
 //! 압축 로직은 전부 파이썬 쪽에 있고, 여기서는 아무 파일도 읽거나 쓰지 않는다 - 탐색기
 //! 프로세스 안에서 도는 코드이므로 최대한 얇게 유지해 장애 지점을 줄인다.
 
+mod popup;
 mod preview;
 
 use std::cell::Cell;
@@ -93,7 +94,9 @@ fn should_show(kind: CommandKind, paths: &[String]) -> bool {
     match kind {
         CommandKind::Root => true,
         // 풀기/보기 계열은 고른 것이 전부 압축 파일일 때만 의미가 있다.
-        CommandKind::Preview | CommandKind::ExtractSmart | CommandKind::ExtractHere => all_archives,
+        // 미리보기는 창을 띄우므로 여러 개를 고르면 창이 쏟아진다 - 하나일 때만.
+        CommandKind::Preview => all_archives && paths.len() == 1,
+        CommandKind::ExtractSmart | CommandKind::ExtractHere => all_archives,
         // 압축 계열은 언제나 가능하다(압축 파일을 다시 압축할 수도 있다).
         CommandKind::CompressWithOptions | CommandKind::CompressNow => true,
         // "각각"은 2개 이상일 때만 의미가 있다 - 하나면 바로 압축하기와 결과가 같다.
@@ -245,6 +248,16 @@ impl IExplorerCommand_Impl for PackNineCommand_Impl {
         if paths.is_empty() {
             return Ok(());
         }
+        // 미리보기는 프로그램을 띄우지 않고 DLL이 직접 가벼운 창을 연다.
+        // PackNine.exe를 실행하면 "열기"와 다를 게 없고, 단일 exe라 실행마다
+        // 임시 폴더에 풀리느라 수 초가 걸려 "미리"보기가 되지 않는다.
+        if self.0 == CommandKind::Preview {
+            for path in &paths {
+                popup::show_preview_window(std::path::PathBuf::from(path));
+            }
+            return Ok(());
+        }
+
         let Some(exe) = packnine_exe() else {
             return Err(Error::from(E_FAIL));
         };

@@ -86,7 +86,7 @@ fn zip_listing(path: &Path) -> std::result::Result<String, String> {
 }
 
 /// 미리보기 창에 넣을 본문을 만든다. 실패해도 문자열을 돌려준다(빈 창 방지).
-fn preview_text(path: &Path) -> String {
+pub(crate) fn preview_text(path: &Path) -> String {
     let extension = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
