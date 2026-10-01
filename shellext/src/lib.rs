@@ -8,10 +8,17 @@
 //! `desktop4:FileExplorerContextMenus`가 아래 CLSID를 가리킨다. 패키지 서명은
 //! 마이크로소프트가 스토어 제출 시 수행하므로 별도 인증서가 필요 없다.
 //!
-//! 하는 일은 하나뿐이다: 선택된 경로들을 모아 `PackNine.exe compress-dialog`를 실행한다.
+//! 메뉴 구조: 반디집처럼 "PackNine" 하나로 묶고 그 아래에 동작을 둔다. 루트 명령이
+//! `ECF_HASSUBCOMMANDS`를 돌려주고 `EnumSubCommands`로 하위 항목을 넘기는 방식이다.
+//! 레거시 레지스트리 캐스케이드는 과거(v0.5.x) 일부 탐색기 경로에서 명령이 실행되지 않아
+//! 되돌린 적이 있지만, `IExplorerCommand`의 하위 명령은 셸이 공식 지원하는 구조라
+//! 그 문제가 없다.
+//!
+//! 하는 일은 하나뿐이다: 선택된 경로들을 모아 PackNine.exe를 적절한 인자로 실행한다.
 //! 압축 로직은 전부 파이썬 쪽에 있고, 여기서는 아무 파일도 읽거나 쓰지 않는다 - 탐색기
 //! 프로세스 안에서 도는 코드이므로 최대한 얇게 유지해 장애 지점을 줄인다.
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -30,6 +37,53 @@ static mut DLL_MODULE: HMODULE = HMODULE(std::ptr::null_mut());
 
 /// 살아 있는 COM 객체 수. 0이 되어야 탐색기가 DLL을 내려도 안전하다.
 static OBJECT_COUNT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// 메뉴에 올라가는 명령 종류. 루트 하나와 그 아래 동작들로 나뉜다.
+#[derive(Clone, Copy, PartialEq)]
+enum CommandKind {
+    /// "PackNine" - 하위 메뉴를 갖는 묶음 항목.
+    Root,
+    /// 옵션 창을 띄워 포맷·강도·비밀번호·제외 패턴을 고른 뒤 압축.
+    CompressWithOptions,
+    /// 묻지 않고 바로 zip으로 압축.
+    CompressNow,
+    /// 선택 항목을 하나로 묶지 않고 항목별로 각각 압축.
+    CompressEach,
+}
+
+impl CommandKind {
+    fn title(self) -> PCWSTR {
+        match self {
+            CommandKind::Root => w!("PackNine"),
+            CommandKind::CompressWithOptions => w!("압축하기..."),
+            CommandKind::CompressNow => w!("바로 압축하기"),
+            CommandKind::CompressEach => w!("각각 압축하기"),
+        }
+    }
+
+    /// PackNine.exe에 넘길 인자. 선택 경로는 호출부가 뒤에 덧붙인다.
+    fn arguments(self) -> &'static [&'static str] {
+        match self {
+            // 루트는 직접 실행되지 않지만, 혹시 눌렸을 때를 대비해 옵션 창과 같게 둔다.
+            CommandKind::Root | CommandKind::CompressWithOptions => {
+                &["compress-dialog", "--no-collect"]
+            }
+            CommandKind::CompressNow => &["smart-compress"],
+            CommandKind::CompressEach => &["smart-compress", "--each"],
+        }
+    }
+
+    fn has_subcommands(self) -> bool {
+        matches!(self, CommandKind::Root)
+    }
+}
+
+/// 하위 메뉴에 들어갈 순서.
+const SUB_COMMANDS: [CommandKind; 3] = [
+    CommandKind::CompressWithOptions,
+    CommandKind::CompressNow,
+    CommandKind::CompressEach,
+];
 
 fn module_dir() -> Option<PathBuf> {
     let mut buffer = [0u16; 32768];
@@ -75,31 +129,31 @@ fn selected_paths(items: Option<&IShellItemArray>) -> Vec<String> {
 }
 
 #[implement(IExplorerCommand)]
-struct CompressCommand;
+struct PackNineCommand(CommandKind);
 
-impl CompressCommand {
-    fn new() -> Self {
+impl PackNineCommand {
+    fn new(kind: CommandKind) -> Self {
         OBJECT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self
+        Self(kind)
     }
 }
 
-impl Drop for CompressCommand {
+impl Drop for PackNineCommand {
     fn drop(&mut self) {
         OBJECT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
-impl IExplorerCommand_Impl for CompressCommand_Impl {
+impl IExplorerCommand_Impl for PackNineCommand_Impl {
     fn GetTitle(&self, _items: Option<&IShellItemArray>) -> Result<PWSTR> {
         // 반환 문자열은 탐색기가 CoTaskMemFree로 해제하므로 SHStrDupW로 할당해야 한다.
-        unsafe { SHStrDupW(w!("PackNine으로 압축하기")) }
+        unsafe { SHStrDupW(self.0.title()) }
     }
 
     fn GetIcon(&self, _items: Option<&IShellItemArray>) -> Result<PWSTR> {
-        // 아이콘은 exe에 내장된 첫 번째 것을 쓴다.
+        // 아이콘은 exe에 내장된 첫 번째 것을 쓴다(묶음과 하위 항목 모두 동일).
         let Some(exe) = packnine_exe() else {
-            return Err(Error::empty());
+            return Err(Error::from(E_NOTIMPL));
         };
         let spec: Vec<u16> = format!("{},0", exe.display())
             .encode_utf16()
@@ -136,10 +190,8 @@ impl IExplorerCommand_Impl for CompressCommand_Impl {
         };
 
         // 탐색기 프로세스를 붙잡지 않도록 띄우기만 하고 기다리지 않는다.
-        // compress-dialog는 인자로 받은 경로 전부를 한 창에 담는다(다중 선택도 창 하나).
         std::process::Command::new(exe)
-            .arg("compress-dialog")
-            .arg("--no-collect")
+            .args(self.0.arguments())
             .args(&paths)
             .spawn()
             .map_err(|_| Error::from(E_FAIL))?;
@@ -147,12 +199,89 @@ impl IExplorerCommand_Impl for CompressCommand_Impl {
     }
 
     fn GetFlags(&self) -> Result<u32> {
-        Ok(ECF_DEFAULT.0 as u32)
+        if self.0.has_subcommands() {
+            Ok(ECF_HASSUBCOMMANDS.0 as u32)
+        } else {
+            Ok(ECF_DEFAULT.0 as u32)
+        }
     }
 
     fn EnumSubCommands(&self) -> Result<IEnumExplorerCommand> {
-        // 하위 메뉴 없음.
-        Err(Error::from(E_NOTIMPL))
+        if !self.0.has_subcommands() {
+            return Err(Error::from(E_NOTIMPL));
+        }
+        let commands: Vec<IExplorerCommand> = SUB_COMMANDS
+            .iter()
+            .map(|kind| PackNineCommand::new(*kind).into())
+            .collect();
+        Ok(SubCommandEnum::new(commands).into())
+    }
+}
+
+#[implement(IEnumExplorerCommand)]
+struct SubCommandEnum {
+    commands: Vec<IExplorerCommand>,
+    position: Cell<usize>,
+}
+
+impl SubCommandEnum {
+    fn new(commands: Vec<IExplorerCommand>) -> Self {
+        OBJECT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            commands,
+            position: Cell::new(0),
+        }
+    }
+}
+
+impl Drop for SubCommandEnum {
+    fn drop(&mut self) {
+        OBJECT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl IEnumExplorerCommand_Impl for SubCommandEnum_Impl {
+    fn Next(
+        &self,
+        celt: u32,
+        pucelt: *mut Option<IExplorerCommand>,
+        pceltfetched: *mut u32,
+    ) -> HRESULT {
+        let mut fetched = 0u32;
+        let start = self.position.get();
+        for offset in 0..celt as usize {
+            let Some(command) = self.commands.get(start + offset) else {
+                break;
+            };
+            unsafe { *pucelt.add(offset) = Some(command.clone()) };
+            fetched += 1;
+        }
+        self.position.set(start + fetched as usize);
+        if !pceltfetched.is_null() {
+            unsafe { *pceltfetched = fetched };
+        }
+        if fetched == celt {
+            S_OK
+        } else {
+            S_FALSE
+        }
+    }
+
+    fn Skip(&self, celt: u32) -> Result<()> {
+        self.position.set(self.position.get() + celt as usize);
+        Ok(())
+    }
+
+    fn Reset(&self) -> Result<()> {
+        self.position.set(0);
+        Ok(())
+    }
+
+    fn Clone(&self) -> Result<IEnumExplorerCommand> {
+        // 현재 위치까지 함께 복제해야 열거 상태가 어긋나지 않는다.
+        let copy = SubCommandEnum::new(self.commands.clone());
+        copy.position.set(self.position.get());
+        Ok(copy.into())
     }
 }
 
@@ -169,7 +298,8 @@ impl IClassFactory_Impl for CommandFactory_Impl {
         if outer.is_some() {
             return Err(Error::from(CLASS_E_NOAGGREGATION));
         }
-        let command: IExplorerCommand = CompressCommand::new().into();
+        // 탐색기가 만드는 것은 언제나 묶음(루트)이고, 하위 항목은 EnumSubCommands가 준다.
+        let command: IExplorerCommand = PackNineCommand::new(CommandKind::Root).into();
         unsafe { command.query(iid, object).ok() }
     }
 
@@ -211,7 +341,11 @@ pub extern "system" fn DllCanUnloadNow() -> HRESULT {
 }
 
 #[no_mangle]
-pub extern "system" fn DllMain(module: HMODULE, reason: u32, _reserved: *mut core::ffi::c_void) -> BOOL {
+pub extern "system" fn DllMain(
+    module: HMODULE,
+    reason: u32,
+    _reserved: *mut core::ffi::c_void,
+) -> BOOL {
     const DLL_PROCESS_ATTACH: u32 = 1;
     if reason == DLL_PROCESS_ATTACH {
         unsafe { DLL_MODULE = module };
