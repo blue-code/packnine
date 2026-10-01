@@ -85,6 +85,47 @@ fn zip_listing(path: &Path) -> std::result::Result<String, String> {
     Ok(header)
 }
 
+/// 아카이브 안의 파일 목록을 (내부 경로, 크기)로 돌려준다. 메뉴에 올릴 때 쓴다.
+pub(crate) fn zip_entries(path: &Path, limit: usize) -> Option<Vec<(String, u64)>> {
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else { continue };
+        if entry.is_dir() {
+            continue;
+        }
+        entries.push((entry.name().to_string(), entry.size()));
+        if entries.len() >= limit {
+            break;
+        }
+    }
+    Some(entries)
+}
+
+/// 아카이브 안의 파일 하나를 임시 폴더에 꺼내고 그 경로를 돌려준다.
+pub(crate) fn extract_one(archive: &Path, name: &str) -> Option<PathBuf> {
+    let file = File::open(archive).ok()?;
+    let mut zip = zip::ZipArchive::new(file).ok()?;
+    let mut entry = zip.by_name(name).ok()?;
+
+    let target_dir = std::env::temp_dir().join("PackNinePreview");
+    std::fs::create_dir_all(&target_dir).ok()?;
+    // 내부 폴더 구조는 버리고 파일 이름만 쓴다(경로 탈출 위험을 원천 차단).
+    let file_name = Path::new(name).file_name()?;
+    let target = target_dir.join(file_name);
+    let mut out = File::create(&target).ok()?;
+    std::io::copy(&mut entry, &mut out).ok()?;
+    Some(target)
+}
+
+pub(crate) fn format_entry_size(bytes: u64) -> String {
+    format_size(bytes)
+}
+
 /// 미리보기 창에 넣을 본문을 만든다. 실패해도 문자열을 돌려준다(빈 창 방지).
 pub(crate) fn preview_text(path: &Path) -> String {
     let extension = path
