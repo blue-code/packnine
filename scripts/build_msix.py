@@ -79,14 +79,13 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-  xmlns:uap2="http://schemas.microsoft.com/appx/manifest/uap/windows10/2"
   xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
   xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
   xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
-  IgnorableNamespaces="uap uap2 uap3 rescap com desktop2 desktop4 desktop5">
+  IgnorableNamespaces="uap uap3 rescap com desktop2 desktop4 desktop5">
 
   <Identity
     Name="{IDENTITY_NAME}"
@@ -142,13 +141,11 @@ def build_manifest(version: str, extensions: tuple[str, ...]) -> str:
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>
         <uap3:Extension Category="windows.fileTypeAssociation">
+          <!-- 파일 연결(더블클릭)만 담당한다. 풀기 동작은 모던 메뉴의 PackNine 묶음에
+               있으므로 여기에 verb를 두면 "추가 옵션 표시"에 같은 항목이 중복으로 뜬다. -->
           <uap3:FileTypeAssociation Name="packninearchive" Parameters="open &quot;%1&quot;">
             <uap:DisplayName>PackNine 압축 파일</uap:DisplayName>
             <uap:Logo>Assets\\StoreLogo.png</uap:Logo>
-            <uap2:SupportedVerbs>
-              <uap3:Verb Id="extractsmart" Parameters="smart-extract &quot;%1&quot;">PackNine으로 알아서 풀기</uap3:Verb>
-              <uap3:Verb Id="extracthere" Parameters="smart-extract --here &quot;%1&quot;">PackNine으로 여기에 풀기</uap3:Verb>
-            </uap2:SupportedVerbs>
             <uap:SupportedFileTypes>
 {file_types}
             </uap:SupportedFileTypes>

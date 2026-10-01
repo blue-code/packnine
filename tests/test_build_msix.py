@@ -50,13 +50,19 @@ def test_manifest_declares_full_trust_capability():
     assert 'EntryPoint="Windows.FullTrustApplication"' in xml
 
 
-def test_manifest_declares_extract_verbs():
-    # 매니페스트로 선언할 수 있는 건 아카이브 확장자에 붙는 동사뿐이다.
+def test_manifest_has_no_legacy_verbs_to_avoid_duplicate_menu():
+    """파일 연결에 verb를 두면 "추가 옵션 표시"에 모던 메뉴와 같은 항목이 중복으로 뜬다.
+
+    풀기 동작은 전부 IExplorerCommand(PackNine 묶음)가 담당하므로, 여기에는 더블클릭
+    연결만 남긴다.
+    """
     xml = build_msix.build_manifest("0.9.0.0", (".zip",))
 
-    assert "PackNine으로 알아서 풀기" in xml
-    assert "PackNine으로 여기에 풀기" in xml
-    assert "smart-extract" in xml
+    assert "SupportedVerbs" not in xml
+    assert "알아서 풀기" not in xml
+    assert "여기에 풀기" not in xml
+    # 더블클릭으로 여는 연결 자체는 남아 있어야 한다.
+    assert 'Parameters="open &quot;%1&quot;"' in xml
 
 
 def test_manifest_registers_shell_extension_com_server():

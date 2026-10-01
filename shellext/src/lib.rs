@@ -38,6 +38,27 @@ pub const CLSID_PACKNINE_COMPRESS: GUID = GUID::from_u128(0xd1c9c67d_cf0a_494e_9
 /// DLL 자신의 모듈 핸들. DllMain에서 받아 exe 경로를 계산할 때 쓴다.
 static mut DLL_MODULE: HMODULE = HMODULE(std::ptr::null_mut());
 
+/// 마지막으로 셸이 넘겨준 선택 경로.
+///
+/// EnumSubCommands에는 선택 목록이 넘어오지 않아 GetTitle/GetState에서 받아 둬야 하는데,
+/// 탐색기가 그 호출을 어느 객체에 할지 보장하지 않는다(다른 인스턴스에 물어보고 확장은
+/// 또 다른 인스턴스에서 일어날 수 있다). 인스턴스별로 보관하면 비어 있는 채로 확장되어
+/// 메뉴가 "로드하는 중"에서 멈춘다. 메뉴는 한 번에 하나만 열리므로 전역에 둔다.
+static LAST_SELECTION: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_selection(paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = LAST_SELECTION.lock() {
+        *guard = paths.to_vec();
+    }
+}
+
+fn last_selection() -> Vec<String> {
+    LAST_SELECTION.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 /// 살아 있는 COM 객체 수. 0이 되어야 탐색기가 DLL을 내려도 안전하다.
 static OBJECT_COUNT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
@@ -232,8 +253,15 @@ impl PackNineCommand {
         let paths = selected_paths(items);
         if !paths.is_empty() {
             *self.context.borrow_mut() = paths.clone();
+            remember_selection(&paths);
         }
         paths
+    }
+
+    /// 하위 메뉴를 만들 때 쓸 선택 경로. 인스턴스에 없으면 전역에서 가져온다.
+    fn context_paths(&self) -> Vec<String> {
+        let own = self.context.borrow().clone();
+        if own.is_empty() { last_selection() } else { own }
     }
 }
 
@@ -339,35 +367,56 @@ impl IExplorerCommand_Impl for PackNineCommand_Impl {
         }
 
         if self.kind == CommandKind::Preview {
-            // 메뉴 자체에 아카이브 내용을 펼친다. 별도 창을 띄우거나 한 번 더 누를 필요가 없다.
-            let context = self.context.borrow().clone();
-            let Some(archive) = context.first() else {
-                return Err(Error::from(E_FAIL));
-            };
-            let archive_path = std::path::PathBuf::from(archive);
-            let entries = preview::zip_entries(&archive_path, MAX_MENU_ENTRIES + 1)
-                .ok_or_else(|| Error::from(E_FAIL))?;
+            // 메뉴 자체에 아카이브 내용을 펼친다. 한 번 더 누를 필요가 없다.
+            //
+            // 여기서 절대 실패를 돌려주면 안 된다. ECF_HASSUBCOMMANDS를 광고해 놓고
+            // E_FAIL을 주면 탐색기가 "로드하는 중"에서 멈춘 채 끝나고, 이후 그 세션에서는
+            // 메뉴가 아예 뜨지 않는다. 읽지 못했으면 안내 항목 하나라도 돌려준다.
+            let context = self.context_paths();
+            let archive_path = context
+                .first()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default();
 
+            let entries = preview::zip_entries(&archive_path, MAX_MENU_ENTRIES + 1);
             let mut commands: Vec<IExplorerCommand> = Vec::new();
-            for (name, size) in entries.iter().take(MAX_MENU_ENTRIES) {
-                let label = format!("{}   ({})", name, preview::format_entry_size(*size));
-                commands.push(
-                    PackNineCommand::entry_item(label, archive_path.clone(), name.clone()).into(),
-                );
-            }
-            if commands.is_empty() {
-                return Err(Error::from(E_FAIL));
-            }
-            if entries.len() > MAX_MENU_ENTRIES {
-                // 메뉴에 다 담기 어려운 아카이브는 전체 목록 창으로 넘긴다.
-                commands.push(
-                    PackNineCommand::entry_item(
-                        "모두 보기...".to_string(),
-                        archive_path.clone(),
-                        String::new(),
-                    )
-                    .into(),
-                );
+
+            match entries {
+                Some(entries) if !entries.is_empty() => {
+                    for (name, size) in entries.iter().take(MAX_MENU_ENTRIES) {
+                        let label =
+                            format!("{}   ({})", name, preview::format_entry_size(*size));
+                        commands.push(
+                            PackNineCommand::entry_item(
+                                label,
+                                archive_path.clone(),
+                                name.clone(),
+                            )
+                            .into(),
+                        );
+                    }
+                    if entries.len() > MAX_MENU_ENTRIES {
+                        commands.push(
+                            PackNineCommand::entry_item(
+                                "모두 보기...".to_string(),
+                                archive_path.clone(),
+                                String::new(),
+                            )
+                            .into(),
+                        );
+                    }
+                }
+                _ => {
+                    // zip이 아니거나 읽지 못한 경우. 누르면 전체 목록 창이 사정을 설명한다.
+                    commands.push(
+                        PackNineCommand::entry_item(
+                            "내용을 읽을 수 없습니다".to_string(),
+                            archive_path.clone(),
+                            String::new(),
+                        )
+                        .into(),
+                    );
+                }
             }
             return Ok(SubCommandEnum::new(commands).into());
         }
