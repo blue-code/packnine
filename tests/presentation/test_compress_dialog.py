@@ -20,7 +20,7 @@ def test_get_result_returns_values_entered_by_user(qtbot, tmp_path):
     dialog._password_edit.setText("secret")
     dialog._password_confirm_edit.setText("secret")
 
-    source_paths, result_destination, password, level, volume_size = dialog.get_result()
+    source_paths, result_destination, password, level, volume_size, _ = dialog.get_result()
 
     assert source_paths == [initial_file]
     assert result_destination == destination
@@ -80,7 +80,7 @@ def test_initial_destination_prefills_output_path_and_format(qtbot, tmp_path):
     # 확장자와 포맷 콤보가 어긋나면 _on_format_changed가 경로를 덮어써 혼란스럽다.
     assert dialog._format_combo.currentText() == ".7z"
 
-    source_paths, result_destination, _, _, volume_size = dialog.get_result()
+    source_paths, result_destination, _, _, volume_size, _ = dialog.get_result()
     assert source_paths == [initial_file]
     assert result_destination == destination
     assert volume_size is None
@@ -113,7 +113,7 @@ def test_split_preset_fills_spinbox_and_result_carries_volume_size(qtbot, tmp_pa
 
     assert dialog._volume_spin.isEnabled()
     assert dialog._volume_spin.value() == 10
-    _, _, _, _, volume_size = dialog.get_result()
+    _, _, _, _, volume_size, _ = dialog.get_result()
     assert volume_size is not None
     assert volume_size.megabytes == 10
 
@@ -174,3 +174,22 @@ def test_split_combo_lists_every_preset_with_tooltip(qtbot):
     assert labels[1:-1] == [p.label for p in SPLIT_PRESETS]
     for i, preset in enumerate(SPLIT_PRESETS, start=1):
         assert dialog._split_combo.itemData(i, Qt.ItemDataRole.ToolTipRole) == preset.note
+
+
+def test_exclude_field_becomes_filter_in_result(qtbot, tmp_path):
+    # 옵션 창에 적은 제외 패턴이 압축에 그대로 전달되어야 한다.
+    dialog = CompressDialog()
+    qtbot.addWidget(dialog)
+    dialog._exclude_edit.setText(".git, node_modules, *.tmp")
+
+    exclude_filter = dialog.get_result()[5]
+
+    assert exclude_filter.patterns == (".git", "node_modules", "*.tmp")
+
+
+def test_empty_exclude_field_filters_nothing(qtbot):
+    # 빈 입력이 "전부 제외"로 해석되면 빈 아카이브가 만들어진다 - 반드시 비어 있어야 한다.
+    dialog = CompressDialog()
+    qtbot.addWidget(dialog)
+
+    assert dialog.get_result()[5].is_empty

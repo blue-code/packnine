@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
+from packnine.domain.file_filter import ExcludeFilter
 from packnine.domain.value_objects import SPLIT_PRESETS, CompressionLevel, VolumeSize
 
 # 포맷 콤보박스에 노출할 확장자 목록 (7z_adapter/tar_adapter/zip_adapter가 지원하는 것 중
@@ -131,6 +132,14 @@ class CompressDialog(QDialog):
         form_layout.addRow("압축 강도", level_layout)
         form_layout.addRow("비밀번호", self._password_edit)
         form_layout.addRow("비밀번호 확인", self._password_confirm_edit)
+
+        self._exclude_edit = QLineEdit()
+        self._exclude_edit.setPlaceholderText(".git, node_modules, *.tmp")
+        self._exclude_edit.setToolTip(
+            "압축에서 뺄 파일·폴더 이름이나 패턴을 쉼표로 구분해 적습니다.\n"
+            "폴더 이름을 적으면 어느 깊이에 있든 통째로 빠집니다."
+        )
+        form_layout.addRow("제외할 항목", self._exclude_edit)
         form_layout.addRow("분할 압축", split_layout)
         form_layout.addRow("", self._split_note_label)
 
@@ -267,11 +276,17 @@ class CompressDialog(QDialog):
     def get_result(
         self,
     ) -> tuple[
-        list[pathlib.Path], pathlib.Path, str | None, CompressionLevel, VolumeSize | None
+        list[pathlib.Path],
+        pathlib.Path,
+        str | None,
+        CompressionLevel,
+        VolumeSize | None,
+        ExcludeFilter,
     ]:
-        """다이얼로그 입력값을 (소스경로들, 출력경로, 비밀번호, 압축강도, 분할크기)로 반환한다.
+        """입력값을 (소스경로들, 출력경로, 비밀번호, 압축강도, 분할크기, 제외필터)로 반환한다.
 
-        분할크기는 분할을 켜지 않았거나 포맷이 분할을 지원하지 않으면 None이다.
+        분할크기는 분할을 켜지 않았거나 포맷이 분할을 지원하지 않으면 None이고,
+        제외필터는 입력이 없으면 비어 있는(아무것도 거르지 않는) 필터다.
         """
         source_paths = [
             pathlib.Path(self._file_list.item(i).text())
@@ -280,7 +295,14 @@ class CompressDialog(QDialog):
         destination = pathlib.Path(self._destination_edit.text().strip())
         password = self._password_edit.text() or None
         compression_level = _closest_compression_level(self._level_slider.value())
-        return source_paths, destination, password, compression_level, self.selected_volume_size()
+        return (
+            source_paths,
+            destination,
+            password,
+            compression_level,
+            self.selected_volume_size(),
+            ExcludeFilter.from_text(self._exclude_edit.text()),
+        )
 
 
 def _closest_compression_level(value: int) -> CompressionLevel:

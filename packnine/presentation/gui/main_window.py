@@ -48,6 +48,7 @@ from packnine.application.update_service import UpdateService
 from packnine.domain.entities import ArchiveEntry, ArchiveManifest
 from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryError
 from packnine.domain.value_objects import DuplicatePolicy
+from packnine.application.password_book import PasswordBook
 from packnine.application.recent_files_service import RecentFilesService
 from packnine.presentation.gui.image_viewer import ImageViewerDialog, is_image_name
 from packnine.presentation.gui.text_preview import is_text_name, read_text_preview
@@ -171,6 +172,9 @@ class MainWindow(QMainWindow):
         self._compress_service = CompressService()
         self._extract_service = ExtractService()
         self._recent_files = RecentFilesService()
+        # 같은 비밀번호를 쓰는 아카이브를 연달아 열 때 자동으로 먼저 시도한다.
+        # 이번 실행 동안만 기억한다(디스크에 남기지 않는다).
+        self._password_book = PasswordBook()
         self._inspect_service = InspectService()
         self._update_service = UpdateService()
 
@@ -406,8 +410,17 @@ class MainWindow(QMainWindow):
         dialog = CompressDialog(parent=self)
         if dialog.exec() != CompressDialog.DialogCode.Accepted:
             return
-        source_paths, destination, password, compression_level, volume_size = dialog.get_result()
-        self._run_compress(source_paths, destination, password, compression_level, volume_size)
+        (
+            source_paths,
+            destination,
+            password,
+            compression_level,
+            volume_size,
+            exclude_filter,
+        ) = dialog.get_result()
+        self._run_compress(
+            source_paths, destination, password, compression_level, volume_size, exclude_filter
+        )
 
     def _on_extract(self) -> None:
         if self._current_archive_path is None:
@@ -768,6 +781,7 @@ class MainWindow(QMainWindow):
         password: str | None,
         compression_level,
         volume_size=None,
+        exclude_filter=None,
     ) -> None:
         progress = self._make_progress_dialog("압축 중...")
         try:
@@ -777,6 +791,7 @@ class MainWindow(QMainWindow):
                 password=password,
                 compression_level=compression_level,
                 volume_size=volume_size,
+                exclude_filter=exclude_filter,
                 on_progress=self._progress_callback(progress),
             )
         except UnsafeArchiveEntryError as exc:
@@ -849,16 +864,40 @@ class MainWindow(QMainWindow):
         비밀번호 외의 예외는 그대로 전파해 호출자의 기존 except 절이 처리하게 한다.
         """
         password = self._current_password
+        tried_book = False
         while True:
             try:
                 operation(password)
             except InvalidPasswordError:
+                if not tried_book:
+                    # 사용자에게 묻기 전에, 이번 실행에서 통했던 비밀번호들을 조용히 시도한다.
+                    tried_book = True
+                    found = self._password_book.try_each(
+                        lambda candidate: self._attempt_quietly(operation, candidate)
+                    )
+                    if found is not None:
+                        self._current_password = found
+                        return True
                 password = self._prompt_password()
                 if password is None:
                     return False
             else:
                 self._current_password = password
+                self._password_book.remember(password)
                 return True
+
+    @staticmethod
+    def _attempt_quietly(operation, password: str) -> bool:
+        """비밀번호 하나로 조용히 시도해 성공 여부만 돌려준다.
+
+        비밀번호가 틀린 경우만 실패로 보고, 그 외의 예외는 호출자가 처리하도록 전파한다
+        (손상된 아카이브를 비밀번호 문제로 오인해 목록을 끝까지 훑으면 느리기만 하다).
+        """
+        try:
+            operation(password)
+        except InvalidPasswordError:
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # 탐색기형 뷰 갱신
@@ -1347,8 +1386,22 @@ class MainWindow(QMainWindow):
 
         dialog = CompressDialog(initial_files=paths, parent=self)
         if dialog.exec() == CompressDialog.DialogCode.Accepted:
-            source_paths, destination, password, compression_level, volume_size = dialog.get_result()
-            self._run_compress(source_paths, destination, password, compression_level, volume_size)
+            (
+                source_paths,
+                destination,
+                password,
+                compression_level,
+                volume_size,
+                exclude_filter,
+            ) = dialog.get_result()
+            self._run_compress(
+                source_paths,
+                destination,
+                password,
+                compression_level,
+                volume_size,
+                exclude_filter,
+            )
 
 
 def run_gui(initial_archive: pathlib.Path | None = None) -> int:

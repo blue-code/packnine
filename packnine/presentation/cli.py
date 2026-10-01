@@ -441,7 +441,14 @@ def _cmd_compress_dialog(args: argparse.Namespace) -> int:
     if dialog.exec() != compress_dialog_module.CompressDialog.DialogCode.Accepted:
         return 0
 
-    source_paths, destination, password, compression_level, volume_size = dialog.get_result()
+    (
+        source_paths,
+        destination,
+        password,
+        compression_level,
+        volume_size,
+        exclude_filter,
+    ) = dialog.get_result()
     service = CompressService()
 
     def operation(on_progress):
@@ -451,6 +458,7 @@ def _cmd_compress_dialog(args: argparse.Namespace) -> int:
             password=password,
             compression_level=compression_level,
             volume_size=volume_size,
+            exclude_filter=exclude_filter,
             on_progress=on_progress,
         )
 

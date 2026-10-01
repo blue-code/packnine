@@ -754,3 +754,56 @@ def test_opening_archive_records_it_in_recent_menu(qtbot, tmp_path, monkeypatch)
     assert recent_files.load(store_path=store) == [archive]
     labels = [a.text() for a in window._recent_menu.actions()]
     assert archive.name in labels
+
+
+def test_password_book_tries_known_password_before_prompting(qtbot, tmp_path, monkeypatch):
+    # 같은 비밀번호를 쓰는 두 번째 아카이브에서는 입력창이 뜨지 않아야 한다.
+    from packnine.domain.exceptions import InvalidPasswordError
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._password_book.remember("공용비밀번호")
+
+    prompted: list[int] = []
+    monkeypatch.setattr(window, "_prompt_password", lambda: prompted.append(1))
+
+    seen: list[str | None] = []
+
+    def operation(password):
+        seen.append(password)
+        if password != "공용비밀번호":
+            raise InvalidPasswordError("틀림")
+
+    assert window._execute_with_password_retry(operation) is True
+    assert prompted == []
+    assert window._current_password == "공용비밀번호"
+
+
+def test_password_book_remembers_password_entered_by_user(qtbot, monkeypatch):
+    from packnine.domain.exceptions import InvalidPasswordError
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_prompt_password", lambda: "새비밀번호")
+
+    def operation(password):
+        if password != "새비밀번호":
+            raise InvalidPasswordError("틀림")
+
+    assert window._execute_with_password_retry(operation) is True
+    # 다음 아카이브에서 자동 시도되도록 목록에 들어가야 한다.
+    assert "새비밀번호" in window._password_book.candidates()
+
+
+def test_password_prompt_still_appears_when_book_has_no_match(qtbot, monkeypatch):
+    from packnine.domain.exceptions import InvalidPasswordError
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._password_book.remember("틀린것")
+    monkeypatch.setattr(window, "_prompt_password", lambda: None)  # 사용자가 취소
+
+    def operation(password):
+        raise InvalidPasswordError("틀림")
+
+    assert window._execute_with_password_retry(operation) is False

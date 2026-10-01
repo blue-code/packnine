@@ -8,6 +8,7 @@ import pathlib
 
 import pytest
 
+from packnine.domain.file_filter import ExcludeFilter
 from packnine.presentation.cli import _has_console, main
 
 
@@ -414,7 +415,9 @@ def test_compress_dialog_command_prefills_sources_and_auto_destination(
     source.write_text("hello " * 20, encoding="utf-8")
     destination = tmp_path / "custom.zip"
     fake = _patch_compress_dialog(
-        monkeypatch, accepted=True, result=([source], destination, None, CompressionLevel.NORMAL, None)
+        monkeypatch,
+        accepted=True,
+        result=([source], destination, None, CompressionLevel.NORMAL, None, ExcludeFilter()),
     )
 
     exit_code = main(["compress-dialog", "--no-collect", str(source)])
@@ -480,7 +483,14 @@ def test_compress_dialog_command_uses_collected_paths(qtbot, tmp_path, monkeypat
     fake = _patch_compress_dialog(
         monkeypatch,
         accepted=True,
-        result=([first, second], destination, None, CompressionLevel.NORMAL, None),
+        result=(
+            [first, second],
+            destination,
+            None,
+            CompressionLevel.NORMAL,
+            None,
+            ExcludeFilter(),
+        ),
     )
 
     exit_code = main(["compress-dialog", str(first)])
@@ -559,7 +569,14 @@ def test_compress_dialog_command_passes_volume_size_to_service(qtbot, tmp_path, 
     _patch_compress_dialog(
         monkeypatch,
         accepted=True,
-        result=([src], destination, None, CompressionLevel.NORMAL, VolumeSize.from_megabytes(1)),
+        result=(
+            [src],
+            destination,
+            None,
+            CompressionLevel.NORMAL,
+            VolumeSize.from_megabytes(1),
+            ExcludeFilter(),
+        ),
     )
 
     exit_code = main(["compress-dialog", "--no-collect", str(src)])
