@@ -48,11 +48,30 @@ pub(crate) fn object_removed() {
     OBJECT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 압축 파일로 취급할 확장자. 파이썬 쪽 _ARCHIVE_EXTENSIONS와 같은 목록이다.
+const ARCHIVE_EXTENSIONS: [&str; 9] = [
+    "zip", "7z", "rar", "tar", "tgz", "gz", "bz2", "xz", "001",
+];
+
+fn is_archive(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    match lowered.rsplit_once('.') {
+        Some((_, ext)) => ARCHIVE_EXTENSIONS.contains(&ext),
+        None => false,
+    }
+}
+
 /// 메뉴에 올라가는 명령 종류. 루트 하나와 그 아래 동작들로 나뉜다.
 #[derive(Clone, Copy, PartialEq)]
 enum CommandKind {
     /// "PackNine" - 하위 메뉴를 갖는 묶음 항목.
     Root,
+    /// 압축 파일을 PackNine으로 열어 내용을 본다.
+    Preview,
+    /// 내용에 맞춰 알아서 풀기.
+    ExtractSmart,
+    /// 현재 폴더에 바로 풀기.
+    ExtractHere,
     /// 옵션 창을 띄워 포맷·강도·비밀번호·제외 패턴을 고른 뒤 압축.
     CompressWithOptions,
     /// 묻지 않고 바로 zip으로 압축.
@@ -61,10 +80,34 @@ enum CommandKind {
     CompressEach,
 }
 
+/// 선택 내용에 따라 이 항목을 메뉴에 띄울지 정한다.
+///
+/// 레지스트리 verb로는 "선택 개수"나 "확장자 조합"을 조건으로 걸 수 없어서, 파일 하나를
+/// 골라도 "각각 압축하기"가 뜨고 압축 파일을 골라도 압축 메뉴만 뜨는 문제가 있었다.
+/// IExplorerCommand는 선택 목록을 그대로 받으므로 여기서 걸러낼 수 있다.
+fn should_show(kind: CommandKind, paths: &[String]) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    let all_archives = paths.iter().all(|p| is_archive(p));
+    match kind {
+        CommandKind::Root => true,
+        // 풀기/보기 계열은 고른 것이 전부 압축 파일일 때만 의미가 있다.
+        CommandKind::Preview | CommandKind::ExtractSmart | CommandKind::ExtractHere => all_archives,
+        // 압축 계열은 언제나 가능하다(압축 파일을 다시 압축할 수도 있다).
+        CommandKind::CompressWithOptions | CommandKind::CompressNow => true,
+        // "각각"은 2개 이상일 때만 의미가 있다 - 하나면 바로 압축하기와 결과가 같다.
+        CommandKind::CompressEach => paths.len() >= 2,
+    }
+}
+
 impl CommandKind {
     fn title(self) -> PCWSTR {
         match self {
             CommandKind::Root => w!("PackNine"),
+            CommandKind::Preview => w!("미리보기"),
+            CommandKind::ExtractSmart => w!("알아서 풀기"),
+            CommandKind::ExtractHere => w!("여기에 풀기"),
             CommandKind::CompressWithOptions => w!("압축하기..."),
             CommandKind::CompressNow => w!("바로 압축하기"),
             CommandKind::CompressEach => w!("각각 압축하기"),
@@ -78,6 +121,9 @@ impl CommandKind {
             CommandKind::Root | CommandKind::CompressWithOptions => {
                 &["compress-dialog", "--no-collect"]
             }
+            CommandKind::Preview => &["open"],
+            CommandKind::ExtractSmart => &["smart-extract"],
+            CommandKind::ExtractHere => &["smart-extract", "--here"],
             CommandKind::CompressNow => &["smart-compress"],
             CommandKind::CompressEach => &["smart-compress", "--each"],
         }
@@ -88,8 +134,12 @@ impl CommandKind {
     }
 }
 
-/// 하위 메뉴에 들어갈 순서.
-const SUB_COMMANDS: [CommandKind; 3] = [
+/// 하위 메뉴에 들어갈 순서. 압축 파일을 골랐을 때 가장 자주 쓰는 동작이 위로 오도록
+/// 풀기 계열을 앞에 둔다(해당 없는 항목은 should_show가 숨긴다).
+const SUB_COMMANDS: [CommandKind; 6] = [
+    CommandKind::Preview,
+    CommandKind::ExtractSmart,
+    CommandKind::ExtractHere,
     CommandKind::CompressWithOptions,
     CommandKind::CompressNow,
     CommandKind::CompressEach,
@@ -182,11 +232,11 @@ impl IExplorerCommand_Impl for PackNineCommand_Impl {
     }
 
     fn GetState(&self, items: Option<&IShellItemArray>, _slow: BOOL) -> Result<u32> {
-        // 실제 경로가 하나도 없으면(가상 폴더 등) 메뉴를 숨긴다.
-        if selected_paths(items).is_empty() {
-            Ok(ECS_HIDDEN.0 as u32)
-        } else {
+        // 실제 경로가 없거나(가상 폴더 등) 선택 내용에 맞지 않는 항목은 숨긴다.
+        if should_show(self.0, &selected_paths(items)) {
             Ok(ECS_ENABLED.0 as u32)
+        } else {
+            Ok(ECS_HIDDEN.0 as u32)
         }
     }
 
@@ -382,4 +432,76 @@ pub extern "system" fn DllMain(
         unsafe { DLL_MODULE = module };
     }
     TRUE
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn archive_detection_by_extension() {
+        assert!(is_archive(r"C:\a\b.zip"));
+        assert!(is_archive(r"C:\a\b.7z"));
+        assert!(is_archive(r"C:\a\b.ZIP"));
+        // 분할 압축 첫 볼륨도 압축 파일로 본다.
+        assert!(is_archive(r"C:\a\b.zip.001"));
+        assert!(!is_archive(r"C:\a\b.txt"));
+        assert!(!is_archive(r"C:\a\확장자없음"));
+    }
+
+    #[test]
+    fn each_compress_hidden_for_single_selection() {
+        // 하나만 고르면 "각각 압축하기"는 "바로 압축하기"와 결과가 같아 혼란만 준다.
+        assert!(!should_show(CommandKind::CompressEach, &paths(&[r"C:\a\only.txt"])));
+        assert!(should_show(
+            CommandKind::CompressEach,
+            &paths(&[r"C:\a\one.txt", r"C:\a\two.txt"])
+        ));
+    }
+
+    #[test]
+    fn extract_commands_only_for_archives() {
+        let archive = paths(&[r"C:\a\pack.zip"]);
+        let document = paths(&[r"C:\a\memo.txt"]);
+
+        for kind in [CommandKind::Preview, CommandKind::ExtractSmart, CommandKind::ExtractHere] {
+            assert!(should_show(kind, &archive));
+            assert!(!should_show(kind, &document));
+        }
+    }
+
+    #[test]
+    fn extract_hidden_when_selection_is_mixed() {
+        // 압축 파일과 일반 파일을 섞어 고르면 "풀기"가 무엇을 뜻하는지 모호하다.
+        let mixed = paths(&[r"C:\a\pack.zip", r"C:\a\memo.txt"]);
+
+        assert!(!should_show(CommandKind::ExtractSmart, &mixed));
+        // 반면 압축은 섞여 있어도 말이 된다.
+        assert!(should_show(CommandKind::CompressWithOptions, &mixed));
+    }
+
+    #[test]
+    fn compress_available_even_for_archives() {
+        // 압축 파일을 다시 압축하는 것도 정상적인 요구다.
+        let archive = paths(&[r"C:\a\pack.zip"]);
+
+        assert!(should_show(CommandKind::CompressWithOptions, &archive));
+        assert!(should_show(CommandKind::CompressNow, &archive));
+    }
+
+    #[test]
+    fn nothing_shows_without_real_paths() {
+        for kind in [
+            CommandKind::Root,
+            CommandKind::Preview,
+            CommandKind::CompressNow,
+            CommandKind::CompressEach,
+        ] {
+            assert!(!should_show(kind, &[]));
+        }
+    }
 }
