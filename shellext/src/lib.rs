@@ -88,8 +88,10 @@ fn is_archive(path: &str) -> bool {
 enum CommandKind {
     /// "PackNine" - 하위 메뉴를 갖는 묶음 항목.
     Root,
-    /// 압축 파일 안의 목록을 하위 메뉴로 펼친다(추가 클릭 없이 바로 보인다).
-    Preview,
+    /// 항목과 동작 사이를 가르는 구분선.
+    Separator,
+    /// 메뉴에 다 담기지 않은 나머지를 창으로 보여준다.
+    PreviewAll,
     /// 위 목록의 항목 하나. 누르면 그 파일만 꺼내서 연결 프로그램으로 연다.
     PreviewEntry,
     /// 내용에 맞춰 알아서 풀기.
@@ -118,10 +120,8 @@ fn should_show(kind: CommandKind, paths: &[String]) -> bool {
         CommandKind::Root => true,
         // 풀기/보기 계열은 고른 것이 전부 압축 파일일 때만 의미가 있다.
         // 미리보기는 창을 띄우므로 여러 개를 고르면 창이 쏟아진다 - 하나일 때만.
-        // 내용 보기는 메뉴에 목록을 펼치므로 압축 파일 하나를 골랐을 때만.
-        CommandKind::Preview => all_archives && paths.len() == 1,
-        // 하위 항목은 부모가 이미 걸렀으므로 항상 보인다.
-        CommandKind::PreviewEntry => true,
+        // 목록과 구분선은 부모가 압축 파일일 때만 만들어지므로 항상 보인다.
+        CommandKind::Separator | CommandKind::PreviewAll | CommandKind::PreviewEntry => true,
         CommandKind::ExtractSmart | CommandKind::ExtractHere => all_archives,
         // 압축 계열은 언제나 가능하다(압축 파일을 다시 압축할 수도 있다).
         CommandKind::CompressWithOptions | CommandKind::CompressNow => true,
@@ -134,7 +134,8 @@ impl CommandKind {
     fn title(self) -> PCWSTR {
         match self {
             CommandKind::Root => w!("PackNine"),
-            CommandKind::Preview => w!("내용 보기"),
+            CommandKind::Separator => w!(""),
+            CommandKind::PreviewAll => w!("모두 보기..."),
             // 하위 항목 제목은 동적이라 여기 값은 쓰이지 않는다.
             CommandKind::PreviewEntry => w!(""),
             CommandKind::ExtractSmart => w!("알아서 풀기"),
@@ -152,7 +153,7 @@ impl CommandKind {
             CommandKind::Root | CommandKind::CompressWithOptions => {
                 &["compress-dialog", "--no-collect"]
             }
-            CommandKind::Preview | CommandKind::PreviewEntry => &["open"],
+            CommandKind::Separator | CommandKind::PreviewAll | CommandKind::PreviewEntry => &["open"],
             CommandKind::ExtractSmart => &["smart-extract"],
             CommandKind::ExtractHere => &["smart-extract", "--here"],
             CommandKind::CompressNow => &["smart-compress"],
@@ -161,8 +162,13 @@ impl CommandKind {
     }
 
     fn has_subcommands(self) -> bool {
-        // 미리보기도 하위 메뉴를 갖는다 - 그 안에 아카이브 내용이 펼쳐진다.
-        matches!(self, CommandKind::Root | CommandKind::Preview)
+        // 루트만 하위 메뉴를 갖는다.
+        //
+        // Windows 11 모던 메뉴는 하위 메뉴를 한 단계만 그린다. 예전처럼
+        // 루트 > 미리보기 > 파일들로 두 단계를 쌓으면 모던 메뉴에서 세 번째 단계가
+        // 통째로 비어 보이고(레거시 "추가 옵션 표시"에서는 정상), 그래서 파일 목록을
+        // 루트 바로 아래로 평탄화했다.
+        matches!(self, CommandKind::Root)
     }
 }
 
@@ -171,8 +177,7 @@ const MAX_MENU_ENTRIES: usize = 20;
 
 /// 하위 메뉴에 들어갈 순서. 압축 파일을 골랐을 때 가장 자주 쓰는 동작이 위로 오도록
 /// 풀기 계열을 앞에 둔다(해당 없는 항목은 should_show가 숨긴다).
-const SUB_COMMANDS: [CommandKind; 6] = [
-    CommandKind::Preview,
+const SUB_COMMANDS: [CommandKind; 5] = [
     CommandKind::ExtractSmart,
     CommandKind::ExtractHere,
     CommandKind::CompressWithOptions,
@@ -237,6 +242,17 @@ impl PackNineCommand {
     fn new(kind: CommandKind) -> Self {
         OBJECT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self { kind, entry: None, context: RefCell::new(Vec::new()) }
+    }
+
+    /// 선택 경로를 미리 심어 둔 하위 명령을 만든다.
+    ///
+    /// 패키지 COM 호스트는 활성화 단위로 뜨고 사라진다. 메뉴를 그릴 때와 하위 메뉴를
+    /// 펼칠 때가 다른 프로세스일 수 있어 전역 캐시도 비어버릴 수 있으므로, 부모가
+    /// 가진 경로를 자식 객체에 그대로 복사해 둔다.
+    fn with_context(kind: CommandKind, paths: &[String]) -> Self {
+        let command = Self::new(kind);
+        *command.context.borrow_mut() = paths.to_vec();
+        command
     }
 
     /// 미리보기 하위 항목(= 아카이브 안의 파일 하나)을 만든다.
@@ -332,14 +348,6 @@ impl IExplorerCommand_Impl for PackNineCommand_Impl {
             return Ok(());
         }
 
-        // "내용 보기"를 직접 누른 경우(하위 메뉴를 펼치지 않고) 전체 목록 창을 띄운다.
-        if self.kind == CommandKind::Preview {
-            for path in &paths {
-                popup::show_preview_window(std::path::PathBuf::from(path));
-            }
-            return Ok(());
-        }
-
         let Some(exe) = packnine_exe() else {
             return Err(Error::from(E_FAIL));
         };
@@ -354,6 +362,9 @@ impl IExplorerCommand_Impl for PackNineCommand_Impl {
     }
 
     fn GetFlags(&self) -> Result<u32> {
+        if self.kind == CommandKind::Separator {
+            return Ok(ECF_ISSEPARATOR.0 as u32);
+        }
         if self.kind.has_subcommands() {
             Ok(ECF_HASSUBCOMMANDS.0 as u32)
         } else {
@@ -366,65 +377,46 @@ impl IExplorerCommand_Impl for PackNineCommand_Impl {
             return Err(Error::from(E_NOTIMPL));
         }
 
-        if self.kind == CommandKind::Preview {
-            // 메뉴 자체에 아카이브 내용을 펼친다. 한 번 더 누를 필요가 없다.
-            //
-            // 여기서 절대 실패를 돌려주면 안 된다. ECF_HASSUBCOMMANDS를 광고해 놓고
-            // E_FAIL을 주면 탐색기가 "로드하는 중"에서 멈춘 채 끝나고, 이후 그 세션에서는
-            // 메뉴가 아예 뜨지 않는다. 읽지 못했으면 안내 항목 하나라도 돌려준다.
-            let context = self.context_paths();
-            let archive_path = context
-                .first()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_default();
+        let paths = self.context_paths();
+        let mut commands: Vec<IExplorerCommand> = Vec::new();
 
-            let entries = preview::zip_entries(&archive_path, MAX_MENU_ENTRIES + 1);
-            let mut commands: Vec<IExplorerCommand> = Vec::new();
-
-            match entries {
-                Some(entries) if !entries.is_empty() => {
-                    for (name, size) in entries.iter().take(MAX_MENU_ENTRIES) {
-                        let label =
-                            format!("{}   ({})", name, preview::format_entry_size(*size));
-                        commands.push(
-                            PackNineCommand::entry_item(
-                                label,
-                                archive_path.clone(),
-                                name.clone(),
-                            )
+        // 압축 파일 하나를 골랐으면 내용을 메뉴 맨 위에 바로 펼친다.
+        // 한 단계만 그려지므로 하위 메뉴를 더 두지 않고 여기에 직접 넣는다.
+        if paths.len() == 1 && is_archive(&paths[0]) {
+            let archive_path = std::path::PathBuf::from(&paths[0]);
+            if let Some(entries) = preview::zip_entries(&archive_path, MAX_MENU_ENTRIES + 1) {
+                for (name, size) in entries.iter().take(MAX_MENU_ENTRIES) {
+                    let label = format!("{}   ({})", name, preview::format_entry_size(*size));
+                    commands.push(
+                        PackNineCommand::entry_item(label, archive_path.clone(), name.clone())
                             .into(),
-                        );
-                    }
-                    if entries.len() > MAX_MENU_ENTRIES {
-                        commands.push(
-                            PackNineCommand::entry_item(
-                                "모두 보기...".to_string(),
-                                archive_path.clone(),
-                                String::new(),
-                            )
-                            .into(),
-                        );
-                    }
+                    );
                 }
-                _ => {
-                    // zip이 아니거나 읽지 못한 경우. 누르면 전체 목록 창이 사정을 설명한다.
+                if entries.len() > MAX_MENU_ENTRIES {
                     commands.push(
                         PackNineCommand::entry_item(
-                            "내용을 읽을 수 없습니다".to_string(),
+                            "모두 보기...".to_string(),
                             archive_path.clone(),
                             String::new(),
                         )
                         .into(),
                     );
                 }
+                if !commands.is_empty() {
+                    commands.push(
+                        PackNineCommand::with_context(CommandKind::Separator, &paths).into(),
+                    );
+                }
             }
-            return Ok(SubCommandEnum::new(commands).into());
         }
 
-        let commands: Vec<IExplorerCommand> = SUB_COMMANDS
-            .iter()
-            .map(|kind| PackNineCommand::new(*kind).into())
-            .collect();
+        commands.extend(
+            SUB_COMMANDS
+                .iter()
+                .map(|kind| -> IExplorerCommand {
+                    PackNineCommand::with_context(*kind, &paths).into()
+                }),
+        );
         Ok(SubCommandEnum::new(commands).into())
     }
 }
@@ -619,7 +611,7 @@ mod menu_tests {
         let archive = paths(&[r"C:\a\pack.zip"]);
         let document = paths(&[r"C:\a\memo.txt"]);
 
-        for kind in [CommandKind::Preview, CommandKind::ExtractSmart, CommandKind::ExtractHere] {
+        for kind in [CommandKind::ExtractSmart, CommandKind::ExtractHere] {
             assert!(should_show(kind, &archive));
             assert!(!should_show(kind, &document));
         }
@@ -648,7 +640,6 @@ mod menu_tests {
     fn nothing_shows_without_real_paths() {
         for kind in [
             CommandKind::Root,
-            CommandKind::Preview,
             CommandKind::CompressNow,
             CommandKind::CompressEach,
         ] {

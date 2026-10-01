@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "packnine_shellext"
-version = "0.11.6"
+version = "0.11.8"
 dependencies = [
  "windows",
  "windows-core",
