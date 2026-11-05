@@ -14,6 +14,7 @@ from __future__ import annotations
 import pathlib
 import shutil
 import stat
+import tempfile
 import time
 import zipfile
 
@@ -25,7 +26,7 @@ from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
 from packnine.domain.file_filter import ExcludeFilter
 from packnine.domain.value_objects import CompressionLevel, VolumeSize
-from packnine.infrastructure import source_walk, volume_io
+from packnine.infrastructure import libarchive_tool, source_walk, volume_io
 
 
 def _is_symlink_zipinfo(info: zipfile.ZipInfo) -> bool:
@@ -48,6 +49,38 @@ def _to_timestamp(date_time: tuple[int, int, int, int, int, int]) -> float | Non
 
 
 _UTF8_FLAG = 0x800  # general purpose bit 11: 파일명이 UTF-8임을 나타내는 zip 표준 플래그
+
+# 멤버 하나를 디스크로 옮길 때 쓰는 버퍼 크기.
+# shutil 기본값(64KB)은 기가바이트급 동영상에서 호출 횟수만 불필요하게 늘린다.
+_COPY_CHUNK = 1024 * 1024
+
+_ENCRYPTED_FLAG = 0x1  # general purpose bit 0: 엔트리가 암호화돼 있음
+_WZ_AES_COMPRESS_TYPE = 99  # WinZip AES는 압축 방식 99로 표시된다(구형 ZipCrypto와 구분)
+
+
+def _copy_with_progress(
+    src,
+    dst,
+    entry_name: str,
+    already_written: int,
+    total_bytes: int,
+    on_progress: ProgressCallback | None,
+) -> int:
+    """멤버 하나를 옮기면서 중간에도 진행률을 올린다. 옮긴 바이트 수를 돌려준다.
+
+    엔트리가 끝날 때만 보고하면 6GB짜리 동영상 하나를 푸는 동안 막대가 제자리에
+    멈춰 있다. 사용자 눈에는 멈춘 것과 구분되지 않는다.
+    """
+    written = 0
+    while True:
+        chunk = src.read(_COPY_CHUNK)
+        if not chunk:
+            break
+        dst.write(chunk)
+        written += len(chunk)
+        if on_progress is not None and total_bytes > 0:
+            on_progress(entry_name, min(already_written + written, total_bytes), total_bytes)
+    return written
 
 
 def _decode_legacy_filename(info: zipfile.ZipInfo) -> str:
@@ -147,6 +180,37 @@ class ZipArchiveReader:
         policy.validate_manifest(manifest)
         return [(entry, policy.validate_entry(entry, destination)) for entry in entries]
 
+    def uses_legacy_zipcrypto(self) -> bool:
+        """구형 ZipCrypto로 암호화된 엔트리가 있는지 본다.
+
+        플래그 0번 비트는 "암호화됨"만 알려 줄 뿐 방식까지는 알려 주지 않는다.
+        AES(WinZip AES)는 0x9901 확장 필드로 구분하는데, pyzipper가 그 필드를 읽어
+        wz_aes_version에 담아 두고 compress_type은 원래 압축 방식(보통 8)으로
+        되돌려 놓는다. 그래서 compress_type==99로는 걸러지지 않는다.
+
+        둘을 구분하는 이유는 속도가 전혀 다르기 때문이다. AES는 pycryptodome(C)로
+        209MB/s가 나오지만, ZipCrypto는 순수 파이썬이라 1.4MB/s다(실측).
+        """
+        for info in self._zf.infolist():
+            if not info.flag_bits & _ENCRYPTED_FLAG:
+                continue
+            if getattr(info, "wz_aes_version", None) is not None:
+                continue
+            if info.compress_type == _WZ_AES_COMPRESS_TYPE:
+                continue
+            return True
+        return False
+
+    def _should_delegate(self) -> pathlib.Path | None:
+        """bsdtar에 넘길 상황이면 그 실행 파일 경로를, 아니면 None을 돌려준다."""
+        if self._password is None or self._volume_source is not None:
+            # 비밀번호가 없으면 위임할 이유가 없고, 분할 볼륨은 우리가 하나로 이어
+            # 붙여 연 파일 객체라 외부 도구에 경로로 넘길 수 없다.
+            return None
+        if not self.uses_legacy_zipcrypto():
+            return None
+        return libarchive_tool.find_tool()
+
     def extract_all(
         self,
         destination: pathlib.Path,
@@ -163,17 +227,73 @@ class ZipArchiveReader:
             _open_member(self._zf, self._stored_name(first_file.name), self._password_bytes).close()
 
         destination.mkdir(parents=True, exist_ok=True)
-        total = len(validated)
-        for done, (entry, target_path) in enumerate(validated, start=1):
+
+        tool = self._should_delegate()
+        if tool is not None:
+            self._extract_all_delegated(tool, destination, validated, on_progress)
+            return
+
+        total_bytes = sum(entry.size for entry, _ in validated if not entry.is_dir)
+        written = 0
+        for entry, target_path in validated:
             if entry.is_dir:
                 target_path.mkdir(parents=True, exist_ok=True)
-            else:
+                if on_progress is not None:
+                    on_progress(entry.name, min(written, total_bytes), total_bytes)
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with _open_member(self._zf, self._stored_name(entry.name), self._password_bytes) as src:
+                with target_path.open("wb") as dst:
+                    written += _copy_with_progress(
+                        src, dst, entry.name, written, total_bytes, on_progress
+                    )
+            if on_progress is not None and entry.size == 0:
+                # 빈 파일은 복사 중 보고가 한 번도 없다. 목록에서 빠지지 않게 챙긴다.
+                on_progress(entry.name, min(written, total_bytes), total_bytes)
+
+    def _extract_all_delegated(
+        self,
+        tool: pathlib.Path,
+        destination: pathlib.Path,
+        validated: list[tuple[ArchiveEntry, pathlib.Path]],
+        on_progress: ProgressCallback | None,
+    ) -> None:
+        """bsdtar로 풀되, 검증을 통과한 엔트리만 목적지에 남긴다.
+
+        외부 도구는 우리 보안 정책을 모른다. 그래서 목적지에 직접 쓰게 두지 않고
+        우리가 만든 staging 폴더에만 풀게 한 뒤, _validate_all이 계산해 둔 안전한
+        경로로만 옮긴다. staging에 있지만 검증 목록에 없는 것은 그대로 버려진다.
+
+        staging은 목적지와 같은 볼륨에 둔다. 그래야 옮기는 단계가 rename이라 7GB를
+        한 번 더 복사하지 않는다.
+        """
+        staging_parent = destination.parent if destination.parent.exists() else destination
+        staging = pathlib.Path(tempfile.mkdtemp(prefix="packnine_fast_", dir=staging_parent))
+        try:
+            total_bytes = sum(entry.size for entry, _ in validated if not entry.is_dir)
+            libarchive_tool.extract_zip(
+                tool,
+                self._path,
+                staging,
+                self._password or "",
+                total_bytes=total_bytes,
+                on_progress=on_progress,
+            )
+
+            for entry, target_path in validated:
+                if entry.is_dir:
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                source = staging / entry.name
+                if not source.is_file():
+                    # 도구가 내놓지 않은 엔트리는 조용히 건너뛴다(빈 파일을 만들지 않는다).
+                    continue
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                with _open_member(self._zf, self._stored_name(entry.name), self._password_bytes) as src:
-                    with target_path.open("wb") as dst:
-                        shutil.copyfileobj(src, dst)
-            if on_progress is not None:
-                on_progress(entry.name, done, total)
+                if target_path.exists():
+                    target_path.unlink()
+                shutil.move(str(source), str(target_path))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def extract_one(self, entry_name: str, destination: pathlib.Path) -> None:
         destination = pathlib.Path(destination)
@@ -192,7 +312,7 @@ class ZipArchiveReader:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with _open_member(self._zf, self._stored_name(entry.name), self._password_bytes) as src:
                 with target_path.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
+                    shutil.copyfileobj(src, dst, _COPY_CHUNK)
 
     def close(self) -> None:
         self._zf.close()

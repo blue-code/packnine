@@ -20,6 +20,15 @@ from packnine.infrastructure.zip_adapter import ZipArchiveReader, ZipArchiveWrit
 from tests.infrastructure.conftest import assert_tree_equal, make_sample_source_tree
 
 
+
+def reader_entries(archive_path: pathlib.Path):
+    """아카이브 엔트리 목록을 읽어 돌려주는 테스트 도우미."""
+    reader = ZipArchiveReader(archive_path)
+    try:
+        return reader.list_entries()
+    finally:
+        reader.close()
+
 class TestZipRoundTrip:
     def test_round_trip_without_password(self, tmp_path: pathlib.Path):
         src = make_sample_source_tree(tmp_path)
@@ -134,7 +143,18 @@ class TestZipProgressCallback:
         assert len(calls) > 0
         last_name, last_done, last_total = calls[-1]
         assert last_done == last_total
-        assert last_total == len(calls)
+
+        # 진행률 단위는 "엔트리 개수"가 아니라 "바이트"다. 6GB짜리 파일 하나를
+        # 푸는 동안 막대가 제자리에 멈춰 있지 않게 하려면 엔트리 안에서도 보고해야
+        # 하고, 그러면 개수로는 비율을 만들 수 없다.
+        expected_total = sum(
+            entry.size for entry in reader_entries(archive_path) if not entry.is_dir
+        )
+        assert last_total == expected_total
+        # 진행량은 뒤로 가지 않는다.
+        assert all(
+            earlier[1] <= later[1] for earlier, later in zip(calls, calls[1:])
+        ), calls
 
     def test_add_files_calls_progress_callback(self, tmp_path: pathlib.Path):
         src = make_sample_source_tree(tmp_path)
