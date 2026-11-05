@@ -143,9 +143,11 @@ def extract_zip(
     *,
     total_bytes: int = 0,
     on_progress: Callable[[str, int, int], None] | None = None,
+    members: list[str] | None = None,
 ) -> None:
     """archive를 staging 폴더에 푼다. 실패하면 도메인 예외를 던진다.
 
+    members를 주면 그 엔트리들만 꺼낸다(드래그 아웃처럼 일부만 필요한 경우).
     staging은 반드시 호출자가 만든 빈 폴더여야 한다. 이 함수는 목적지를 모른다.
     """
     # --passphrase를 반드시 넘긴다. 빠뜨리면 bsdtar가 콘솔에서 입력을 받으려 하고,
@@ -160,6 +162,11 @@ def extract_zip(
         "-C",
         str(staging),
     ]
+    if members:
+        # 이름은 옵션이 아니라 피연산자로 간다. `--`로 끊어 `-`로 시작하는 이름이
+        # 옵션으로 해석되지 않게 한다.
+        command.append("--")
+        command.extend(members)
 
     process = subprocess.Popen(  # noqa: S603
         command,

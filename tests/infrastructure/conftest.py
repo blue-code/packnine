@@ -92,9 +92,14 @@ def write_zipcrypto_archive(
     path: pathlib.Path,
     members: list[tuple[str, bytes]],
     password: bytes,
+    legacy_encoding: str | None = None,
 ) -> pathlib.Path:
-    """ZipCrypto로 암호화된 zip을 만든다(테스트 픽스처 전용)."""
-    _ENCRYPTED_AND_UTF8 = 0x1 | 0x800
+    """ZipCrypto로 암호화된 zip을 만든다(테스트 픽스처 전용).
+
+    legacy_encoding을 주면 UTF-8 플래그 없이 그 인코딩 바이트로 이름을 적는다
+    (알집 등 구형 도구가 만드는 "cp949 바이트 + 플래그 없음" zip 재현용).
+    """
+    _ENCRYPTED_AND_UTF8 = 0x1 if legacy_encoding else 0x1 | 0x800
     central: list[tuple[bytes, int, int, int, int]] = []
     with path.open("wb") as out:
         for name, data in members:
@@ -106,7 +111,7 @@ def write_zipcrypto_archive(
             header = bytes(bytearray(os.urandom(11)) + bytes([(crc >> 24) & 0xFF]))
             blob = _ZipCryptoEncrypter(password).encrypt(header + body)
 
-            raw_name = name.encode("utf-8")
+            raw_name = name.encode(legacy_encoding or "utf-8")
             out.write(
                 struct.pack(
                     "<IHHHHHIIIHH", 0x04034B50, 20, _ENCRYPTED_AND_UTF8, 8,

@@ -202,10 +202,22 @@ class ZipArchiveReader:
         return False
 
     def _should_delegate(self) -> pathlib.Path | None:
-        """bsdtar에 넘길 상황이면 그 실행 파일 경로를, 아니면 None을 돌려준다."""
+        """bsdtar에 넘길 상황이면 그 실행 파일 경로를, 아니면 None을 돌려준다.
+
+        반드시 list_entries()가 먼저 불린 뒤에 호출해야 한다(_stored_names 판단이
+        그 결과에 달려 있다).
+        """
         if self._password is None or self._volume_source is not None:
             # 비밀번호가 없으면 위임할 이유가 없고, 분할 볼륨은 우리가 하나로 이어
             # 붙여 연 파일 객체라 외부 도구에 경로로 넘길 수 없다.
+            return None
+        if self._stored_names:
+            # UTF-8 플래그 없이 cp949 등으로 적힌 레거시 이름이 섞여 있다. 우리는
+            # cp437 왕복으로 원본 바이트를 되살려 복원하지만, libarchive는 시스템
+            # 코드 페이지로 해석한다. 한국어 Windows에서는 우연히 같은 이름이
+            # 나오지만 다른 로캘에서는 어긋나고, 그러면 staging에서 그 파일을 찾지
+            # 못해 조용히 빠진다. 깨진 한글 파일명 복원은 이 프로그램의 핵심 기능
+            # 중 하나이므로 속도보다 우선한다 - 이런 아카이브는 위임하지 않는다.
             return None
         if not self.uses_legacy_zipcrypto():
             return None
@@ -280,18 +292,29 @@ class ZipArchiveReader:
                 on_progress=on_progress,
             )
 
+            missing: list[str] = []
             for entry, target_path in validated:
                 if entry.is_dir:
                     target_path.mkdir(parents=True, exist_ok=True)
                     continue
                 source = staging / entry.name
                 if not source.is_file():
-                    # 도구가 내놓지 않은 엔트리는 조용히 건너뛴다(빈 파일을 만들지 않는다).
+                    missing.append(entry.name)
                     continue
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 if target_path.exists():
                     target_path.unlink()
                 shutil.move(str(source), str(target_path))
+
+            if missing:
+                # 조용히 넘어가면 사용자는 다 풀린 줄 알고 넘어간다. 빠진 파일이
+                # 있다는 사실 자체가 알려져야 하고, 그러면 호출자가 비위임 경로로
+                # 다시 시도할 수 있다.
+                raise CorruptedArchiveError(
+                    "빠른 해제 경로에서 일부 항목을 찾지 못했습니다: "
+                    + ", ".join(missing[:5])
+                    + (" 외" if len(missing) > 5 else "")
+                )
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -313,6 +336,60 @@ class ZipArchiveReader:
             with _open_member(self._zf, self._stored_name(entry.name), self._password_bytes) as src:
                 with target_path.open("wb") as dst:
                     shutil.copyfileobj(src, dst, _COPY_CHUNK)
+
+    def extract_many(self, entry_names: list[str], destination: pathlib.Path) -> None:
+        """엔트리 여러 개를 한 번에 꺼낸다(드래그 아웃, 선택 항목만 풀기).
+
+        하나씩 extract_one을 부르는 것과 결과는 같지만, 위임이 가능한 아카이브에서는
+        bsdtar를 한 번만 실행한다. 엔트리마다 프로세스를 띄우면 그때마다 아카이브를
+        처음부터 훑어 몇 배로 느려진다.
+        """
+        destination = pathlib.Path(destination)
+        entries = {entry.name: entry for entry in self.list_entries()}
+
+        policy = ArchiveSecurityPolicy()
+        targets: list[tuple[ArchiveEntry, pathlib.Path]] = []
+        for name in entry_names:
+            entry = entries.get(name)
+            if entry is None:
+                raise KeyError(f"아카이브에 존재하지 않는 엔트리입니다: {name}")
+            targets.append((entry, policy.validate_entry(entry, destination)))
+
+        destination.mkdir(parents=True, exist_ok=True)
+
+        tool = self._should_delegate()
+        if tool is None:
+            for name in entry_names:
+                self.extract_one(name, destination)
+            return
+
+        staging_parent = destination.parent if destination.parent.exists() else destination
+        staging = pathlib.Path(tempfile.mkdtemp(prefix="packnine_fast_", dir=staging_parent))
+        try:
+            libarchive_tool.extract_zip(
+                tool,
+                self._path,
+                staging,
+                self._password or "",
+                members=[name for name, _ in ((e.name, t) for e, t in targets)],
+            )
+            for entry, target_path in targets:
+                if entry.is_dir:
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                source = staging / entry.name
+                if not source.is_file():
+                    # 일부만 꺼내는 경로에서는 조용히 넘어가지 않고 느린 경로로
+                    # 되돌아간다. 드래그 아웃은 결과가 바로 눈에 보이는 동작이라
+                    # 파일 하나가 비는 편보다 조금 느린 편이 낫다.
+                    self.extract_one(entry.name, destination)
+                    continue
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if target_path.exists():
+                    target_path.unlink()
+                shutil.move(str(source), str(target_path))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def close(self) -> None:
         self._zf.close()

@@ -238,3 +238,134 @@ class TestToolDiscovery:
             pytest.skip("후보가 하나도 없는 환경")
         assert candidates[0].name.lower() == "tar.exe"
         assert "system32" in str(candidates[0]).lower()
+
+
+class TestLegacyFilenames:
+    """깨진 한글 파일명 복원과 위임이 충돌하지 않아야 한다."""
+
+    def test_legacy_named_archive_is_not_delegated(self, tmp_path: pathlib.Path):
+        """UTF-8 플래그 없는 cp949 이름이 섞이면 위임하지 않는다.
+
+        우리는 cp437 왕복으로 원본 바이트를 되살려 복원하지만, libarchive는 시스템
+        코드 페이지로 해석한다. 한국어 Windows에서는 우연히 같은 이름이 나오지만
+        다른 로캘에서는 어긋나고, 그러면 staging에서 그 파일을 찾지 못해 조용히
+        빠진다. 속도보다 파일명 복원이 우선이다.
+        """
+        _bsdtar_or_skip()
+        archive = tmp_path / "legacy_name.zip"
+        write_zipcrypto_archive(
+            archive, [("한글문서.txt", "내용".encode("utf-8"))],
+            password=b"pw", legacy_encoding="cp949",
+        )
+
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            assert reader.list_entries()[0].name == "한글문서.txt"
+            assert reader._should_delegate() is None, "레거시 이름은 위임하지 않는다"
+            reader.extract_all(tmp_path / "out")
+        finally:
+            reader.close()
+
+        assert (tmp_path / "out" / "한글문서.txt").read_bytes() == "내용".encode("utf-8")
+
+    def test_utf8_named_archive_is_delegated(self, tmp_path: pathlib.Path):
+        """반대로 UTF-8 플래그가 제대로 붙은 한글 이름은 위임해도 안전하다."""
+        _bsdtar_or_skip()
+        archive = tmp_path / "utf8_name.zip"
+        write_zipcrypto_archive(
+            archive, [("한글문서.txt", "내용".encode("utf-8"))], password=b"pw"
+        )
+
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            assert reader._should_delegate() is not None
+            reader.extract_all(tmp_path / "out")
+        finally:
+            reader.close()
+
+        assert (tmp_path / "out" / "한글문서.txt").read_bytes() == "내용".encode("utf-8")
+
+
+class TestMissingOutputIsLoud:
+    def test_missing_staging_file_raises_instead_of_silently_skipping(
+        self, tmp_path: pathlib.Path, monkeypatch
+    ):
+        """외부 도구가 파일을 안 내놓으면 조용히 넘어가지 않는다.
+
+        조용히 건너뛰면 사용자는 다 풀린 줄 알고 넘어간다. 데이터가 없어진 것을
+        모르는 쪽이 느린 쪽보다 훨씬 나쁘다.
+        """
+        from packnine.domain.exceptions import CorruptedArchiveError
+
+        _bsdtar_or_skip()
+        archive = tmp_path / "legacy.zip"
+        write_zipcrypto_archive(archive, [("a.txt", b"hello")], password=b"pw")
+
+        # 도구가 아무것도 쓰지 않은 상황을 흉내 낸다.
+        monkeypatch.setattr(libarchive_tool, "extract_zip", lambda *a, **k: None)
+
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            with pytest.raises(CorruptedArchiveError, match="찾지 못했습니다"):
+                reader.extract_all(tmp_path / "out")
+        finally:
+            reader.close()
+
+
+class TestBatchedEntryExtraction:
+    def test_extract_many_pulls_only_the_requested_entries(self, tmp_path: pathlib.Path):
+        _bsdtar_or_skip()
+        members = [
+            ("문서/기획안.txt", b"plan"),
+            ("문서/회의록.txt", b"minutes"),
+            ("사진/현장.bin", os.urandom(512 * 1024)),
+        ]
+        archive = tmp_path / "legacy.zip"
+        write_zipcrypto_archive(archive, members, password=b"pw")
+
+        destination = tmp_path / "out"
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            reader.extract_many(["문서/회의록.txt", "사진/현장.bin"], destination)
+        finally:
+            reader.close()
+
+        assert (destination / "문서" / "회의록.txt").read_bytes() == b"minutes"
+        assert (destination / "사진" / "현장.bin").read_bytes() == members[2][1]
+        # 요청하지 않은 것은 나오지 않는다.
+        assert not (destination / "문서" / "기획안.txt").exists()
+
+    def test_extract_many_matches_one_by_one_result(self, tmp_path: pathlib.Path, monkeypatch):
+        _bsdtar_or_skip()
+        members = [("a.txt", b"aaa"), ("b.txt", b"bbb")]
+        archive = tmp_path / "legacy.zip"
+        write_zipcrypto_archive(archive, members, password=b"pw")
+
+        fast = tmp_path / "fast"
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            reader.extract_many(["a.txt", "b.txt"], fast)
+        finally:
+            reader.close()
+
+        slow = tmp_path / "slow"
+        monkeypatch.setattr(libarchive_tool, "find_tool", lambda: None)
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            reader.extract_many(["a.txt", "b.txt"], slow)
+        finally:
+            reader.close()
+
+        for name, payload in members:
+            assert (fast / name).read_bytes() == payload == (slow / name).read_bytes()
+
+    def test_unknown_entry_still_raises_key_error(self, tmp_path: pathlib.Path):
+        archive = tmp_path / "legacy.zip"
+        write_zipcrypto_archive(archive, [("a.txt", b"hello")], password=b"pw")
+
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            with pytest.raises(KeyError):
+                reader.extract_many(["없는파일.txt"], tmp_path / "out")
+        finally:
+            reader.close()

@@ -159,8 +159,14 @@ class ExtractService:
 
         reader = format_registry.get_reader(archive_path, password=password)
         try:
-            for entry_name in entry_names:
-                reader.extract_one(entry_name, destination)
+            # 일괄로 꺼낼 수 있는 어댑터는 그쪽을 쓴다(zip이 그렇다). 엔트리마다
+            # 외부 도구를 띄우면 그때마다 아카이브를 처음부터 훑어 몇 배로 느려진다.
+            extract_many = getattr(reader, "extract_many", None)
+            if extract_many is not None:
+                extract_many(list(entry_names), destination)
+            else:
+                for entry_name in entry_names:
+                    reader.extract_one(entry_name, destination)
         finally:
             reader.close()
 
