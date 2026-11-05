@@ -242,8 +242,20 @@ class ZipArchiveReader:
 
         tool = self._should_delegate()
         if tool is not None:
-            self._extract_all_delegated(tool, destination, validated, on_progress)
-            return
+            try:
+                self._extract_all_delegated(tool, destination, validated, on_progress)
+                return
+            except InvalidPasswordError:
+                # 비밀번호 문제는 되돌아가도 똑같이 실패한다. 그대로 올린다.
+                raise
+            except (CorruptedArchiveError, OSError):
+                # 외부 도구가 못 하는 경우가 있다. 대표적으로 파일명이다 - libarchive는
+                # 엔트리 이름을 시스템 코드 페이지로 옮기는데, 영문 Windows(cp1252)에서
+                # 한글 이름은 표현할 수 없어 "empty or unreadable filename"으로 건너뛴다
+                # (한국어 Windows에서는 멀쩡해 로캘에 따라 갈린다).
+                # 이럴 때는 느리지만 확실한 파이썬 경로로 되돌아간다. 빠른 길이 막혔다고
+                # 기능이 없어지면 안 된다.
+                pass
 
         total_bytes = sum(entry.size for entry, _ in validated if not entry.is_dir)
         written = 0
@@ -292,29 +304,30 @@ class ZipArchiveReader:
                 on_progress=on_progress,
             )
 
-            missing: list[str] = []
-            for entry, target_path in validated:
-                if entry.is_dir:
-                    target_path.mkdir(parents=True, exist_ok=True)
-                    continue
-                source = staging / entry.name
-                if not source.is_file():
-                    missing.append(entry.name)
-                    continue
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                if target_path.exists():
-                    target_path.unlink()
-                shutil.move(str(source), str(target_path))
-
+            # 옮기기 전에 전부 있는지 먼저 확인한다. 반쯤 옮겨 놓고 실패하면
+            # 되돌아간 경로가 어중간한 상태 위에서 다시 시작하게 된다.
+            missing = [
+                entry.name
+                for entry, _ in validated
+                if not entry.is_dir and not (staging / entry.name).is_file()
+            ]
             if missing:
                 # 조용히 넘어가면 사용자는 다 풀린 줄 알고 넘어간다. 빠진 파일이
-                # 있다는 사실 자체가 알려져야 하고, 그러면 호출자가 비위임 경로로
-                # 다시 시도할 수 있다.
+                # 있다는 사실 자체가 알려져야 호출자가 느린 경로로 다시 시도한다.
                 raise CorruptedArchiveError(
                     "빠른 해제 경로에서 일부 항목을 찾지 못했습니다: "
                     + ", ".join(missing[:5])
                     + (" 외" if len(missing) > 5 else "")
                 )
+
+            for entry, target_path in validated:
+                if entry.is_dir:
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if target_path.exists():
+                    target_path.unlink()
+                shutil.move(str(staging / entry.name), str(target_path))
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -371,23 +384,32 @@ class ZipArchiveReader:
                 self._path,
                 staging,
                 self._password or "",
-                members=[name for name, _ in ((e.name, t) for e, t in targets)],
+                members=[entry.name for entry, _ in targets],
             )
+            pending = [
+                (entry, target_path)
+                for entry, target_path in targets
+                if entry.is_dir or (staging / entry.name).is_file()
+            ]
+            if len(pending) != len(targets):
+                # 외부 도구가 못 꺼낸 것이 있다(영문 Windows에서 한글 이름 등).
+                # 일부만 옮겨 두면 어중간하니 통째로 느린 경로로 간다.
+                raise CorruptedArchiveError("빠른 경로에서 일부 항목을 꺼내지 못했습니다")
+
             for entry, target_path in targets:
                 if entry.is_dir:
                     target_path.mkdir(parents=True, exist_ok=True)
                     continue
-                source = staging / entry.name
-                if not source.is_file():
-                    # 일부만 꺼내는 경로에서는 조용히 넘어가지 않고 느린 경로로
-                    # 되돌아간다. 드래그 아웃은 결과가 바로 눈에 보이는 동작이라
-                    # 파일 하나가 비는 편보다 조금 느린 편이 낫다.
-                    self.extract_one(entry.name, destination)
-                    continue
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 if target_path.exists():
                     target_path.unlink()
-                shutil.move(str(source), str(target_path))
+                shutil.move(str(staging / entry.name), str(target_path))
+        except InvalidPasswordError:
+            raise
+        except (CorruptedArchiveError, OSError):
+            # 느리지만 확실한 경로로 되돌아간다(extract_all과 같은 이유).
+            for name in entry_names:
+                self.extract_one(name, destination)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 

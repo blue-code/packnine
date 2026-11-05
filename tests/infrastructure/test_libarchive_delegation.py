@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import sys
 
 import pytest
 
@@ -231,12 +232,15 @@ class TestToolDiscovery:
         # 우클릭할 때마다 PATH를 훑고 --version을 실행하면 그 자체가 비용이다.
         assert len(lookups) == 1
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows 기본 tar.exe 경로 규칙")
     def test_windows_builtin_is_checked_first(self):
-        """Windows 11 기본 tar.exe가 후보 맨 앞에 와야 한다(PATH 순서와 무관하게)."""
+        """Windows 11 기본 tar.exe가 후보 맨 앞에 와야 한다(PATH 순서와 무관하게).
+
+        Git for Windows의 GNU tar가 PATH 앞쪽에 있어도 가려지지 않아야 한다.
+        """
         candidates = libarchive_tool._candidates()
         if not candidates:
             pytest.skip("후보가 하나도 없는 환경")
-        assert candidates[0].name.lower() == "tar.exe"
         assert "system32" in str(candidates[0]).lower()
 
 
@@ -286,30 +290,97 @@ class TestLegacyFilenames:
         assert (tmp_path / "out" / "한글문서.txt").read_bytes() == "내용".encode("utf-8")
 
 
-class TestMissingOutputIsLoud:
-    def test_missing_staging_file_raises_instead_of_silently_skipping(
+class TestFallbackWhenToolCannotCope:
+    """외부 도구가 못 하는 경우가 있다. 그때 기능이 사라지면 안 된다.
+
+    실제로 CI가 잡아낸 상황: libarchive는 엔트리 이름을 시스템 코드 페이지로
+    옮기는데, 영문 Windows(cp1252)에서 한글 이름은 표현할 수 없어
+    "empty or unreadable filename"으로 건너뛴다. 한국어 Windows에서는 멀쩡해서
+    로캘에 따라 갈린다. 개발 PC에서만 확인하면 놓치는 종류의 차이다.
+    """
+
+    def test_falls_back_when_the_tool_produces_nothing(
         self, tmp_path: pathlib.Path, monkeypatch
     ):
-        """외부 도구가 파일을 안 내놓으면 조용히 넘어가지 않는다.
+        _bsdtar_or_skip()
+        payload = "한글 내용".encode("utf-8")
+        archive = tmp_path / "legacy.zip"
+        write_zipcrypto_archive(archive, [("문서/기획안.txt", payload)], password=b"pw")
 
-        조용히 건너뛰면 사용자는 다 풀린 줄 알고 넘어간다. 데이터가 없어진 것을
-        모르는 쪽이 느린 쪽보다 훨씬 나쁘다.
-        """
+        # 도구가 이름을 못 읽어 아무것도 못 쓴 상황을 흉내 낸다.
+        monkeypatch.setattr(libarchive_tool, "extract_zip", lambda *a, **k: None)
+
+        destination = tmp_path / "out"
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            reader.extract_all(destination)
+        finally:
+            reader.close()
+
+        # 느린 경로로 되돌아가 끝까지 풀어야 한다.
+        assert (destination / "문서" / "기획안.txt").read_bytes() == payload
+
+    def test_falls_back_when_the_tool_fails(self, tmp_path: pathlib.Path, monkeypatch):
         from packnine.domain.exceptions import CorruptedArchiveError
 
         _bsdtar_or_skip()
+        payload = b"plain ascii"
         archive = tmp_path / "legacy.zip"
-        write_zipcrypto_archive(archive, [("a.txt", b"hello")], password=b"pw")
+        write_zipcrypto_archive(archive, [("a.txt", payload)], password=b"pw")
 
-        # 도구가 아무것도 쓰지 않은 상황을 흉내 낸다.
-        monkeypatch.setattr(libarchive_tool, "extract_zip", lambda *a, **k: None)
+        def _boom(*args, **kwargs):
+            raise CorruptedArchiveError("도구가 실패했다")
 
+        monkeypatch.setattr(libarchive_tool, "extract_zip", _boom)
+
+        destination = tmp_path / "out"
         reader = ZipArchiveReader(archive, password="pw")
         try:
-            with pytest.raises(CorruptedArchiveError, match="찾지 못했습니다"):
+            reader.extract_all(destination)
+        finally:
+            reader.close()
+
+        assert (destination / "a.txt").read_bytes() == payload
+
+    def test_wrong_password_is_not_retried_slowly(self, tmp_path: pathlib.Path, monkeypatch):
+        """비밀번호 오류는 되돌아가도 똑같이 실패한다. 그대로 올려야 한다."""
+        _bsdtar_or_skip()
+        archive = tmp_path / "legacy.zip"
+        write_zipcrypto_archive(archive, [("a.txt", b"hello")], password=b"correct")
+
+        attempts: list[int] = []
+        original = ZipArchiveReader.extract_one
+
+        def _counting(self, name, dest):
+            attempts.append(1)
+            return original(self, name, dest)
+
+        monkeypatch.setattr(ZipArchiveReader, "extract_one", _counting)
+
+        reader = ZipArchiveReader(archive, password="wrong")
+        try:
+            with pytest.raises(InvalidPasswordError):
                 reader.extract_all(tmp_path / "out")
         finally:
             reader.close()
+        assert attempts == [], "비밀번호가 틀렸는데 느린 경로로 다시 시도하면 안 된다"
+
+    def test_entry_extraction_falls_back_too(self, tmp_path: pathlib.Path, monkeypatch):
+        _bsdtar_or_skip()
+        payload = "한글 내용".encode("utf-8")
+        archive = tmp_path / "legacy.zip"
+        write_zipcrypto_archive(archive, [("문서/기획안.txt", payload)], password=b"pw")
+
+        monkeypatch.setattr(libarchive_tool, "extract_zip", lambda *a, **k: None)
+
+        destination = tmp_path / "out"
+        reader = ZipArchiveReader(archive, password="pw")
+        try:
+            reader.extract_many(["문서/기획안.txt"], destination)
+        finally:
+            reader.close()
+
+        assert (destination / "문서" / "기획안.txt").read_bytes() == payload
 
 
 class TestBatchedEntryExtraction:
