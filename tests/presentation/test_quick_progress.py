@@ -1,7 +1,7 @@
 """quick_progress 헬퍼 테스트 - 우클릭 "압축풀기"의 비밀번호 재시도 흐름 검증."""
 from __future__ import annotations
 
-from PySide6.QtWidgets import QInputDialog
+from PySide6.QtWidgets import QApplication, QInputDialog, QProgressDialog
 
 from packnine.domain.exceptions import InvalidPasswordError
 from packnine.presentation.gui import quick_progress
@@ -41,3 +41,33 @@ def test_password_retry_cancel_returns_false_without_error_dialog(qtbot, monkeyp
     assert ok is False
     # 사용자 취소는 오류가 아니므로 에러 다이얼로그를 띄우지 않는다.
     assert critical_calls == []
+
+
+def test_progress_window_is_gone_before_password_prompt(qtbot, monkeypatch):
+    """비밀번호 입력창이 진행률 창에 가려지면 안 된다.
+
+    실제로 겪은 증상: "압축 해제 중" 창이 비밀번호 입력창 위에 떠 있어서, 그 창을
+    먼저 닫아야만 비밀번호를 넣을 수 있었다. 입력창을 띄우는 시점에 보이는 진행률
+    창이 하나도 없어야 한다.
+    """
+
+    def operation(on_progress, password):
+        raise InvalidPasswordError("비밀번호가 필요합니다")
+
+    visible_progress_dialogs: list[int] = []
+
+    def fake_get_text(*args, **kwargs):
+        visible_progress_dialogs.append(
+            sum(
+                1
+                for widget in QApplication.topLevelWidgets()
+                if isinstance(widget, QProgressDialog) and widget.isVisible()
+            )
+        )
+        return ("", False)
+
+    monkeypatch.setattr(QInputDialog, "getText", fake_get_text)
+
+    quick_progress.run_extract_with_password_retry("압축 해제 중", operation)
+
+    assert visible_progress_dialogs == [0]

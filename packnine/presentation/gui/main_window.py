@@ -50,6 +50,7 @@ from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryE
 from packnine.domain.value_objects import DuplicatePolicy
 from packnine.application.password_book import PasswordBook
 from packnine.application.recent_files_service import RecentFilesService
+from packnine.presentation.gui import background
 from packnine.presentation.gui.image_viewer import ImageViewerDialog, is_image_name
 from packnine.presentation.gui.text_preview import is_text_name, read_text_preview
 from packnine.presentation.gui.widgets.archive_table import (
@@ -867,7 +868,7 @@ class MainWindow(QMainWindow):
         tried_book = False
         while True:
             try:
-                operation(password)
+                self._run_off_gui_thread(operation, password)
             except InvalidPasswordError:
                 if not tried_book:
                     # 사용자에게 묻기 전에, 이번 실행에서 통했던 비밀번호들을 조용히 시도한다.
@@ -887,14 +888,25 @@ class MainWindow(QMainWindow):
                 return True
 
     @staticmethod
-    def _attempt_quietly(operation, password: str) -> bool:
+    def _run_off_gui_thread(operation, password: str | None) -> None:
+        """operation(password)를 작업 스레드에서 돌리고 끝날 때까지 기다린다.
+
+        호출부 입장에서는 그냥 동기 호출이지만, 그 사이에도 GUI는 계속 반응한다.
+        큰 파일 하나를 푸는 동안 창이 흰 사각형으로 굳던 문제를 없애기 위한 것이다.
+        진행률은 _progress_callback이 만든 시그널 통로로 따로 올라오므로, 여기서는
+        run_blocking의 진행률 인자를 쓰지 않는다.
+        """
+        background.run_blocking(lambda _report: operation(password))
+
+    @classmethod
+    def _attempt_quietly(cls, operation, password: str) -> bool:
         """비밀번호 하나로 조용히 시도해 성공 여부만 돌려준다.
 
         비밀번호가 틀린 경우만 실패로 보고, 그 외의 예외는 호출자가 처리하도록 전파한다
         (손상된 아카이브를 비밀번호 문제로 오인해 목록을 끝까지 훑으면 느리기만 하다).
         """
         try:
-            operation(password)
+            cls._run_off_gui_thread(operation, password)
         except InvalidPasswordError:
             return False
         return True
@@ -1347,15 +1359,23 @@ class MainWindow(QMainWindow):
         return progress
 
     def _progress_callback(self, progress: QProgressDialog):
-        def _callback(name: str, done: int, total: int) -> None:
+        """작업 스레드에서 불러도 안전한 진행률 콜백을 만든다.
+
+        작업은 background.run_blocking이 작업 스레드에서 돌리므로, 콜백이 위젯을
+        직접 건드리면 안 된다(Qt 위젯은 GUI 스레드 전용). 시그널로 한 번 건너뛰게 해
+        실제 갱신은 GUI 스레드에서 일어나게 한다.
+        """
+
+        def _apply(name: str, done: int, total: int) -> None:
             progress.setLabelText(name)
             if total > 0:
                 progress.setMaximum(total)
                 progress.setValue(done)
-            # UI가 즉시 갱신되도록 이벤트 루프에 양보한다.
-            QApplication.processEvents()
 
-        return _callback
+        bridge = background.ProgressBridge(_apply)
+        # 진행률 창이 살아 있는 동안 통로도 같이 살아 있어야 한다(가비지 수집 방지).
+        progress._packnine_bridge = bridge  # noqa: SLF001 - 수명을 창에 묶기 위한 의도적 부착
+        return bridge.progressed.emit
 
     def _show_error(self, exc: Exception) -> None:
         QMessageBox.critical(self, "오류", str(exc))
