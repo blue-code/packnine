@@ -452,6 +452,11 @@ class ZipArchiveWriter:
         else:
             compression = zipfile.ZIP_DEFLATED
             compresslevel = int(compression_level)  # zlib deflate는 0~9 스케일과 동일
+        # 엔트리를 직접 열어 쓸 때(진행률 보고용 스트리밍) ZipInfo에 다시 넣어 줘야 한다.
+        # ZipInfo.from_file은 compress_type을 STORED로 두기 때문에, 그대로 두면
+        # 압축 수준 설정이 조용히 무시된다.
+        self._compression = compression
+        self._compresslevel = compresslevel
 
         if password:
             self._zf: zipfile.ZipFile = pyzipper.AESZipFile(
@@ -476,11 +481,55 @@ class ZipArchiveWriter:
         # 평탄화와 제외 패턴 적용은 세 어댑터가 공유한다(source_walk).
         file_list = source_walk.collect_files(paths, self._exclude_filter)
 
-        total = len(file_list)
-        for done, (file_path, arcname) in enumerate(file_list, start=1):
-            self._zf.write(file_path, arcname=arcname)
-            if on_progress is not None:
-                on_progress(arcname, done, total)
+        # 진행률 단위는 바이트다. 엔트리 개수로 세면 6GB짜리 동영상 하나를 압축할 때
+        # total이 1이라 끝날 때까지 0%에 멈춰 있다 - 사용자 눈에는 고장과 같다.
+        total_bytes = 0
+        for file_path, _ in file_list:
+            try:
+                total_bytes += file_path.stat().st_size
+            except OSError:
+                continue
+
+        written = 0
+        for file_path, arcname in file_list:
+            written += self._write_one(file_path, arcname, written, total_bytes, on_progress)
+            if on_progress is not None and total_bytes > 0:
+                on_progress(arcname, min(written, total_bytes), total_bytes)
+
+    def _write_one(
+        self,
+        file_path: pathlib.Path,
+        arcname: str,
+        already_written: int,
+        total_bytes: int,
+        on_progress: ProgressCallback | None,
+    ) -> int:
+        """파일 하나를 아카이브에 넣으면서 중간에도 진행률을 올린다.
+
+        ZipFile.write()는 통째로 처리하고 끝나야 돌아오므로 중간 보고를 끼워 넣을
+        수 없다. 그래서 엔트리를 직접 열어 조각내어 쓴다. 비밀번호가 걸린 경우에도
+        이 경로가 AES 암호화를 그대로 적용한다(엔트리 클래스를 ZipFile이 쓰는 것과
+        같은 것으로 맞춰 주기 때문이다).
+        """
+        info_cls = getattr(type(self._zf), "zipinfo_cls", None) or zipfile.ZipInfo
+        zinfo = info_cls.from_file(file_path, arcname=arcname)
+        zinfo.compress_type = self._compression
+        zinfo._compresslevel = self._compresslevel  # noqa: SLF001 - zipfile이 읽는 필드
+
+        written = 0
+        with self._zf.open(zinfo, "w") as destination:
+            with file_path.open("rb") as source:
+                while True:
+                    chunk = source.read(_COPY_CHUNK)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                    written += len(chunk)
+                    if on_progress is not None and total_bytes > 0:
+                        on_progress(
+                            arcname, min(already_written + written, total_bytes), total_bytes
+                        )
+        return written
 
     def close(self) -> None:
         self._zf.close()

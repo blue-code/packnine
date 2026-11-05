@@ -5,9 +5,11 @@
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import zipfile
 
+import pyzipper
 import pytest
 
 from packnine.domain.exceptions import (
@@ -155,6 +157,61 @@ class TestZipProgressCallback:
         assert all(
             earlier[1] <= later[1] for earlier, later in zip(calls, calls[1:])
         ), calls
+
+    def test_add_files_reports_progress_in_bytes_within_one_file(
+        self, tmp_path: pathlib.Path
+    ):
+        """파일 하나를 압축하는 동안에도 진행률이 올라와야 한다.
+
+        엔트리 개수로 세면 6GB짜리 동영상 하나를 압축할 때 total이 1이라 끝날
+        때까지 0%에 멈춰 있다. 사용자 눈에는 고장과 구분되지 않는다.
+        """
+        src = tmp_path / "big.bin"
+        # 압축되지 않는 데이터로 크기를 유지한다(동영상과 같은 조건).
+        src.write_bytes(os.urandom(4 * 1024 * 1024))
+        archive_path = tmp_path / "one_file.zip"
+
+        calls: list[tuple[str, int, int]] = []
+        writer = ZipArchiveWriter(archive_path)
+        writer.add_files([src], on_progress=lambda *a: calls.append(a))
+        writer.close()
+
+        assert len(calls) > 1, f"파일 하나짜리인데 중간 보고가 없다: {calls}"
+        assert calls[-1][1] == calls[-1][2] == src.stat().st_size
+        assert all(
+            earlier[1] <= later[1] for earlier, later in zip(calls, calls[1:])
+        ), calls
+
+    def test_streamed_write_keeps_encryption_and_compression_level(
+        self, tmp_path: pathlib.Path
+    ):
+        """진행률을 위해 직접 엔트리를 열어 쓰더라도 설정이 조용히 빠지면 안 된다.
+
+        ZipInfo.from_file은 compress_type을 STORED로 두기 때문에, 다시 넣어 주지
+        않으면 압축 수준이 무시된다. 암호도 마찬가지로 적용돼야 한다.
+        """
+        src = tmp_path / "payload.bin"
+        src.write_bytes(b"repeat " * 20000)
+
+        encrypted = tmp_path / "enc.zip"
+        writer = ZipArchiveWriter(encrypted, password="pw123")
+        writer.add_files([src])
+        writer.close()
+
+        with pyzipper.AESZipFile(encrypted) as zf:
+            info = zf.infolist()[0]
+            assert info.flag_bits & 0x1, "암호화 플래그가 없다"
+            assert info.wz_aes_version is not None, "AES가 적용되지 않았다"
+            assert info.compress_type == zipfile.ZIP_DEFLATED
+            zf.setpassword(b"pw123")
+            assert zf.read("payload.bin") == src.read_bytes()
+
+        stored = tmp_path / "stored.zip"
+        writer = ZipArchiveWriter(stored, compression_level=CompressionLevel.STORE)
+        writer.add_files([src])
+        writer.close()
+        with zipfile.ZipFile(stored) as zf:
+            assert zf.infolist()[0].compress_type == zipfile.ZIP_STORED
 
     def test_add_files_calls_progress_callback(self, tmp_path: pathlib.Path):
         src = make_sample_source_tree(tmp_path)
