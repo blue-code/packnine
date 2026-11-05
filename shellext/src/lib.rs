@@ -349,6 +349,15 @@ impl IExplorerCommand_Impl for PackNineCommand_Impl {
                 let _ = std::process::Command::new("cmd")
                     .args(["/c", "start", "", &extracted.to_string_lossy()])
                     .spawn();
+            } else if let Some(exe) = packnine_exe() {
+                // 꺼내지 못하는 경우가 있다 - 대표적으로 암호가 걸린 엔트리다.
+                // 목록에는 이름이 보이므로(중앙 디렉터리는 평문) 사용자는 눌러 본다.
+                // 아무 반응이 없으면 고장으로 보이니, 비밀번호를 받을 수 있는
+                // PackNine 본체로 넘긴다.
+                let _ = std::process::Command::new(exe)
+                    .arg("open")
+                    .arg(archive.as_os_str())
+                    .spawn();
             }
             return Ok(());
         }
@@ -470,13 +479,21 @@ impl IEnumExplorerCommand_Impl for SubCommandEnum_Impl {
         pucelt: *mut Option<IExplorerCommand>,
         pceltfetched: *mut u32,
     ) -> HRESULT {
+        if pucelt.is_null() {
+            return E_POINTER;
+        }
         let mut fetched = 0u32;
         let start = self.position.get();
         for offset in 0..celt as usize {
             let Some(command) = self.commands.get(start + offset) else {
                 break;
             };
-            unsafe { *pucelt.add(offset) = Some(command.clone()) };
+            // ptr::write를 써야 한다. `*ptr = value`는 "원래 있던 값"을 먼저 drop하는데,
+            // 이 버퍼는 호출자가 넘겨준 초기화되지 않은 메모리다. 쓰레기 값을
+            // Option<IExplorerCommand>로 보고 drop하면 엉뚱한 주소에 Release()를
+            // 호출하게 된다. 탐색기는 버퍼를 0으로 채워 주기 때문에 지금까지 드러나지
+            // 않았을 뿐, 그렇지 않은 호출자에서는 그대로 죽는다.
+            unsafe { std::ptr::write(pucelt.add(offset), Some(command.clone())) };
             fetched += 1;
         }
         self.position.set(start + fetched as usize);
@@ -491,7 +508,9 @@ impl IEnumExplorerCommand_Impl for SubCommandEnum_Impl {
     }
 
     fn Skip(&self, celt: u32) -> Result<()> {
-        self.position.set(self.position.get() + celt as usize);
+        // 목록 끝을 넘겨 더하면 position이 계속 자라 Next가 영영 아무것도 못 준다.
+        let next = self.position.get().saturating_add(celt as usize);
+        self.position.set(next.min(self.commands.len()));
         Ok(())
     }
 
@@ -603,6 +622,84 @@ mod menu_tests {
 
     fn paths(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 테스트용 zip을 만들고 경로를 돌려준다.
+    fn make_test_zip(name: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for entry in ["문서/기획안.txt", "읽어보기.txt"] {
+            writer.start_file(entry, options).unwrap();
+            writer.write_all(b"hello packnine").unwrap();
+        }
+        writer.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn root_enumerates_actions_and_preview_entries() {
+        // 메뉴가 실제로 무엇을 내놓는지 끝까지 돌려 확인한다. 셸 UI는 자동화할 수
+        // 없으므로 열거자를 직접 돌리는 이 테스트가 메뉴 구성의 유일한 방어선이다.
+        let archive = make_test_zip("packnine_enum_contents.zip");
+        let selection = vec![archive.display().to_string()];
+        let root: IExplorerCommand =
+            PackNineCommand::with_context(CommandKind::Root, &selection).into();
+
+        let enumerator = unsafe { root.EnumSubCommands() }.expect("열거자를 돌려줘야 한다");
+
+        let mut titles = Vec::new();
+        loop {
+            let mut slot: [Option<IExplorerCommand>; 1] = [None];
+            let mut fetched = 0u32;
+            let _ = unsafe { enumerator.Next(&mut slot, Some(&mut fetched)) };
+            if fetched == 0 {
+                break;
+            }
+            let command = slot[0].take().expect("fetched가 1이면 항목이 있어야 한다");
+            let title = unsafe { command.GetTitle(None) };
+            titles.push(match title {
+                Ok(raw) => {
+                    let text = unsafe { raw.to_string() }.unwrap_or_default();
+                    unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(raw.0 as *const _)) };
+                    text
+                }
+                Err(_) => String::new(),
+            });
+            assert!(titles.len() < 64, "열거가 끝나지 않는다");
+        }
+
+        // 동작 항목이 먼저 오고, 그 뒤에 미리보기 묶음이 붙는다.
+        assert!(titles.len() > SUB_COMMANDS.len(), "미리보기가 붙지 않았다: {titles:?}");
+        assert!(
+            titles.iter().any(|t| t.contains("미리보기")),
+            "미리보기 머리글이 없다: {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("기획안.txt")),
+            "아카이브 내용이 메뉴에 없다: {titles:?}"
+        );
+        let _ = std::fs::remove_file(&archive);
+    }
+
+    #[test]
+    fn skip_past_the_end_still_ends_enumeration() {
+        // position이 목록 길이를 넘겨 자라면 Next가 영영 아무것도 못 준다.
+        let archive = make_test_zip("packnine_enum_skip.zip");
+        let selection = vec![archive.display().to_string()];
+        let root: IExplorerCommand =
+            PackNineCommand::with_context(CommandKind::Root, &selection).into();
+        let enumerator = unsafe { root.EnumSubCommands() }.unwrap();
+
+        unsafe { enumerator.Skip(10_000) }.unwrap();
+
+        let mut slot: [Option<IExplorerCommand>; 1] = [None];
+        let mut fetched = 1u32;
+        let _ = unsafe { enumerator.Next(&mut slot, Some(&mut fetched)) };
+        assert_eq!(fetched, 0, "끝을 넘겨 건너뛰었으면 더 줄 것이 없어야 한다");
+        let _ = std::fs::remove_file(&archive);
     }
 
     #[test]
