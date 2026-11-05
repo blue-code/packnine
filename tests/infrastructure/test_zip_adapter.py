@@ -213,6 +213,74 @@ class TestZipProgressCallback:
         with zipfile.ZipFile(stored) as zf:
             assert zf.infolist()[0].compress_type == zipfile.ZIP_STORED
 
+    def test_precompressed_entries_are_stored_but_others_are_compressed(
+        self, tmp_path: pathlib.Path
+    ):
+        """이미 압축된 형식은 저장으로, 나머지는 압축해서 넣는다.
+
+        x265 영상에 deflate를 돌리면 실측 29MB/s를 써서 1.6%를 아낀다. 같은 파일을
+        저장으로 넣으면 몇 배 빠르게 끝난다. 반디집·7-Zip도 같은 판단을 한다.
+        """
+        video = tmp_path / "영화.mkv"
+        video.write_bytes(os.urandom(256 * 1024))
+        text = tmp_path / "메모.txt"
+        # 적당히 압축되는 텍스트. 너무 단조로우면 압축률이 수백 배가 되어
+        # 해제할 때 압축폭탄 가드에 걸린다.
+        lines = [f"{index}번째 줄 내용입니다" for index in range(2000)]
+        text.write_bytes("\n".join(lines).encode("utf-8"))
+
+        archive_path = tmp_path / "mixed.zip"
+        writer = ZipArchiveWriter(archive_path)
+        writer.add_files([video, text])
+        writer.close()
+
+        with zipfile.ZipFile(archive_path) as zf:
+            methods = {info.filename: info.compress_type for info in zf.infolist()}
+        assert methods["영화.mkv"] == zipfile.ZIP_STORED
+        assert methods["메모.txt"] == zipfile.ZIP_DEFLATED
+
+        # 어느 쪽이든 내용은 그대로 돌아와야 한다.
+        destination = tmp_path / "out"
+        reader = ZipArchiveReader(archive_path)
+        reader.extract_all(destination)
+        reader.close()
+        assert (destination / "영화.mkv").read_bytes() == video.read_bytes()
+        assert (destination / "메모.txt").read_bytes() == text.read_bytes()
+
+    def test_maximum_level_still_compresses_precompressed_entries(
+        self, tmp_path: pathlib.Path
+    ):
+        """사용자가 "최대 압축"을 직접 골랐으면 그 의사를 존중한다."""
+        video = tmp_path / "영화.mkv"
+        video.write_bytes(b"repeat " * 5000)
+
+        archive_path = tmp_path / "max.zip"
+        writer = ZipArchiveWriter(archive_path, compression_level=CompressionLevel.MAXIMUM)
+        writer.add_files([video])
+        writer.close()
+
+        with zipfile.ZipFile(archive_path) as zf:
+            assert zf.infolist()[0].compress_type == zipfile.ZIP_DEFLATED
+
+    def test_encrypted_precompressed_entry_is_still_encrypted(
+        self, tmp_path: pathlib.Path
+    ):
+        """저장으로 넣더라도 암호화는 그대로 적용돼야 한다."""
+        video = tmp_path / "영화.mkv"
+        video.write_bytes(os.urandom(64 * 1024))
+
+        archive_path = tmp_path / "enc.zip"
+        writer = ZipArchiveWriter(archive_path, password="pw123")
+        writer.add_files([video])
+        writer.close()
+
+        with pyzipper.AESZipFile(archive_path) as zf:
+            info = zf.infolist()[0]
+            assert info.compress_type == zipfile.ZIP_STORED
+            assert info.wz_aes_version is not None, "저장 엔트리에 AES가 빠졌다"
+            zf.setpassword(b"pw123")
+            assert zf.read("영화.mkv") == video.read_bytes()
+
     def test_add_files_calls_progress_callback(self, tmp_path: pathlib.Path):
         src = make_sample_source_tree(tmp_path)
         archive_path = tmp_path / "write_progress.zip"

@@ -25,6 +25,7 @@ from packnine.domain.exceptions import CorruptedArchiveError, InvalidPasswordErr
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
 from packnine.domain.file_filter import ExcludeFilter
+from packnine.domain import precompressed
 from packnine.domain.value_objects import CompressionLevel, VolumeSize
 from packnine.infrastructure import libarchive_tool, source_walk, volume_io
 
@@ -458,6 +459,17 @@ class ZipArchiveWriter:
         self._compression = compression
         self._compresslevel = compresslevel
 
+        # 이미 압축된 형식(동영상·사진·압축 파일 등)은 deflate를 돌려도 줄지 않는다.
+        # 실측으로 x265 영상은 29MB/s를 써서 1.6%를 아낄 뿐이라, 저장으로 넣으면
+        # 같은 작업이 디스크 속도로 끝난다(6GB 기준 3분 30초 -> 12초).
+        #
+        # 다만 사용자가 "최대 압축"을 직접 골랐다면 그 의사를 존중해 그대로 시도한다.
+        # STORE는 어차피 전부 저장이므로 구분이 필요 없다.
+        self._auto_store_precompressed = compression_level not in (
+            CompressionLevel.STORE,
+            CompressionLevel.MAXIMUM,
+        )
+
         if password:
             self._zf: zipfile.ZipFile = pyzipper.AESZipFile(
                 target,
@@ -513,8 +525,12 @@ class ZipArchiveWriter:
         """
         info_cls = getattr(type(self._zf), "zipinfo_cls", None) or zipfile.ZipInfo
         zinfo = info_cls.from_file(file_path, arcname=arcname)
-        zinfo.compress_type = self._compression
-        zinfo._compresslevel = self._compresslevel  # noqa: SLF001 - zipfile이 읽는 필드
+        if self._auto_store_precompressed and precompressed.is_precompressed(arcname):
+            zinfo.compress_type = zipfile.ZIP_STORED
+            zinfo._compresslevel = None  # noqa: SLF001 - zipfile이 읽는 필드
+        else:
+            zinfo.compress_type = self._compression
+            zinfo._compresslevel = self._compresslevel  # noqa: SLF001
 
         written = 0
         with self._zf.open(zinfo, "w") as destination:
