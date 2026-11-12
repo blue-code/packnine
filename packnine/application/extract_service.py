@@ -8,6 +8,7 @@ import tempfile
 from packnine.application import smart_naming
 from packnine.application.inspect_service import InspectService
 from packnine.domain.entities import ArchiveManifest
+from packnine.domain.exceptions import InsufficientDiskSpaceError
 from packnine.domain.interfaces import ProgressCallback
 from packnine.domain.security_policy import ArchiveSecurityPolicy
 from packnine.domain.value_objects import DuplicatePolicy
@@ -64,9 +65,14 @@ class ExtractService:
             entries = reader.list_entries()
             manifest = ArchiveManifest(entries=entries, format_name=archive_path.suffix)
 
-            # 실제 추출을 시도하기 전에 전체 용량 등을 먼저 검사해, 위험하면
+            # 실제 추출을 시도하기 전에 전체 팽창률 등을 먼저 검사해, 위험하면
             # 추출 시도 자체를 하지 않는다(UnsafeArchiveEntryError는 즉시 전파).
             self._security_policy.validate_manifest(manifest)
+
+            # 그다음 "이 디스크에 들어가는가"를 본다. 보안 정책과 분리한 이유는 둘이
+            # 다른 문제이기 때문이다 - 팽창률은 아카이브의 성질이고, 여유 공간은 이
+            # 컴퓨터의 상태다. 섞으면 정상 파일이 악성으로 보고된다.
+            self._ensure_enough_disk_space(manifest, destination)
 
             # 덮어쓰기(기존 동작)이거나 충돌이 아예 없으면 곧바로 목적지에 푼다.
             # 이 경로에는 추가 비용이 전혀 붙지 않는다.
@@ -96,6 +102,41 @@ class ExtractService:
         motw.propagate_zone_identifier(archive_path, destination, written_names)
 
         return manifest
+
+    @staticmethod
+    def _ensure_enough_disk_space(
+        manifest: ArchiveManifest, destination: pathlib.Path
+    ) -> None:
+        """해제 결과가 목적지 볼륨에 들어가는지 미리 확인한다.
+
+        중간에 디스크가 차면 반쯤 쓰인 파일이 남고 사용자는 어디까지 풀렸는지 알 수
+        없다. 시작 전에 필요량과 여유량을 숫자로 알려 주고 멈추는 편이 낫다.
+
+        여유 공간을 읽을 수 없는 환경(네트워크 드라이브, 권한 문제 등)에서는 검사를
+        건너뛴다. 검사 실패가 해제 실패로 번지면 기능이 퇴보하기 때문이다. 그런 경우
+        공간이 정말 없으면 OS가 쓰기 단계에서 알려 준다.
+        """
+        required = manifest.total_uncompressed_size
+        if required <= 0:
+            return
+
+        # 목적지가 아직 없을 수 있으므로 존재하는 가장 가까운 상위 폴더를 기준으로 본다.
+        probe = destination
+        while not probe.exists():
+            parent = probe.parent
+            if parent == probe:
+                return
+            probe = parent
+
+        try:
+            available = shutil.disk_usage(probe).free
+        except OSError:
+            return
+
+        if required > available:
+            raise InsufficientDiskSpaceError(
+                required_bytes=required, available_bytes=available
+            )
 
     def _extract_via_staging(
         self,

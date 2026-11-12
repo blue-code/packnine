@@ -21,12 +21,32 @@ class ArchiveSecurityPolicy:
     def __init__(
         self,
         max_compression_ratio: float = 100.0,
-        max_total_uncompressed_size: int = 10 * 1024 * 1024 * 1024,
+        max_total_compression_ratio: float = 20.0,
+        min_total_uncompressed_size: int = 10 * 1024 * 1024 * 1024,
+        max_total_uncompressed_size: int | None = None,
         allow_symlinks: bool = False,
         max_entry_count: int = 100_000,
         max_entry_name_length: int = 1024,
     ) -> None:
         self.max_compression_ratio = max_compression_ratio
+        # 합계 팽창률 상한. 엔트리별 상한보다 반드시 낮아야 의미가 있다 - 전체 팽창률은
+        # 엔트리별 팽창률의 가중평균이라 수학적으로 엔트리 최대값을 넘을 수 없고, 두 값을
+        # 같게 두면 이 검사는 절대 발동하지 않는 죽은 코드가 된다. 낮게 두는 덕에
+        # "엔트리마다 압축률 50인 파일 1만 개"처럼 엔트리 검사를 통과하는 조합을 잡는다.
+        self.max_total_compression_ratio = max_total_compression_ratio
+        # 팽창률만으로 막으면 정상 아카이브가 과잉 차단된다. 50MB 로그 묶음이 2GB로
+        # 풀리면 팽창률 40인데, 이건 악의가 아니라 텍스트가 잘 줄어든 결과다. 그래서
+        # 이 크기 아래로 풀리는 아카이브는 팽창률을 묻지 않고 통과시킨다.
+        #
+        # 하한을 10GiB로 둔 것은 0.13.0까지 "절대 상한"이던 값을 뒤집은 것이다. 같은
+        # 숫자를 천장이 아니라 바닥으로 쓴다. 이만큼까지는 보통 디스크에 들어가므로
+        # 실제로 들어가는지는 아래 application 계층의 여유 공간 검사가 판단한다.
+        self.min_total_uncompressed_size = min_total_uncompressed_size
+        # 절대 용량 상한은 기본으로 걸지 않는다(None). 예전에는 10GiB가 기본값이었는데,
+        # 동영상을 압축 없이 담아 둔 10.6GiB zip처럼 압축폭탄과 무관한 아카이브까지
+        # "안전하지 않음"으로 막았다. 압축폭탄의 본질은 절대 크기가 아니라 팽창률이다.
+        # 디스크에 안 들어가는 문제는 보안이 아니라 용량 문제이므로, 목적지를 아는
+        # application 계층에서 실제 여유 공간과 비교해 따로 처리한다.
         self.max_total_uncompressed_size = max_total_uncompressed_size
         self.allow_symlinks = allow_symlinks
         # 압축비/전체용량이 정상 범위여도 엔트리 수가 지나치게 많으면(예: 빈 파일 수백만 개)
@@ -99,14 +119,38 @@ class ArchiveSecurityPolicy:
         return candidate
 
     def validate_manifest(self, manifest: ArchiveManifest) -> None:
-        """전체 압축해제 용량/엔트리 개수가 상한을 넘는지 검사한다."""
+        """아카이브 전체의 팽창률/용량/엔트리 개수가 상한을 넘는지 검사한다."""
         total = manifest.total_uncompressed_size
-        if total > self.max_total_uncompressed_size:
+
+        # 호출자가 절대 상한을 명시했을 때만 적용한다(기본값은 상한 없음).
+        if (
+            self.max_total_uncompressed_size is not None
+            and total > self.max_total_uncompressed_size
+        ):
             raise UnsafeArchiveEntryError(
                 entry_name="__manifest__",
                 reason=(
                     f"전체 압축해제 용량({total} bytes)이 허용 상한"
                     f"({self.max_total_uncompressed_size} bytes)을 초과합니다"
+                ),
+            )
+
+        # 허용량은 "아카이브 실제 크기 x 팽창률 상한"이되, 작은 아카이브가 과잉 차단되지
+        # 않도록 하한을 둔다. 압축하지 않고 담은 아카이브는 팽창률이 1.0이라 항상 통과한다
+        # (출력이 이미 입력만큼 크므로 압축폭탄일 수가 없다).
+        allowance = max(
+            self.min_total_uncompressed_size,
+            int(manifest.total_compressed_size * self.max_total_compression_ratio),
+        )
+        if total > allowance:
+            actual_ratio = total / max(manifest.total_compressed_size, 1)
+            raise UnsafeArchiveEntryError(
+                entry_name="__manifest__",
+                reason=(
+                    f"전체 팽창률({actual_ratio:.1f})이 허용 상한"
+                    f"({self.max_total_compression_ratio})을 초과하여 압축폭탄으로"
+                    f" 의심됩니다(압축 {manifest.total_compressed_size} bytes →"
+                    f" 해제 {total} bytes)"
                 ),
             )
 

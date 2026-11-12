@@ -66,6 +66,7 @@ from packnine.domain.exceptions import (
     CorruptedArchiveError,
     ExternalToolMissingError,
     InvalidPasswordError,
+    InsufficientDiskSpaceError,
     UnsafeArchiveEntryError,
     UnsupportedFormatError,
 )
@@ -565,6 +566,9 @@ def _cmd_smart_extract(args: argparse.Namespace) -> int:
         except UnsafeArchiveEntryError as exc:
             print(f"실패: {archive_path} - 안전하지 않은 아카이브입니다 ({exc})")
             had_failure = True
+        except InsufficientDiskSpaceError as exc:
+            print(f"실패: {archive_path} - {exc}")
+            had_failure = True
         except InvalidPasswordError as exc:
             print(f"실패: {archive_path} - 비밀번호를 확인하세요 ({exc})")
             had_failure = True
@@ -670,6 +674,10 @@ def _main_inner(argv: list[str] | None, console: bool) -> int:
         return 1
     except UnsafeArchiveEntryError as exc:
         print(f"오류: 안전하지 않은 아카이브입니다 - {exc}", file=sys.stderr)
+        return 1
+    except InsufficientDiskSpaceError as exc:
+        # 보안 경고와 섞으면 사용자가 정상 파일을 악성으로 오해한다.
+        print(f"오류: {exc}", file=sys.stderr)
         return 1
     except InvalidPasswordError as exc:
         print(f"오류: 비밀번호를 확인하세요 - {exc}", file=sys.stderr)

@@ -46,7 +46,11 @@ from packnine.application.extract_service import ExtractService
 from packnine.application.inspect_service import InspectService
 from packnine.application.update_service import UpdateService
 from packnine.domain.entities import ArchiveEntry, ArchiveManifest
-from packnine.domain.exceptions import InvalidPasswordError, UnsafeArchiveEntryError
+from packnine.domain.exceptions import (
+    InsufficientDiskSpaceError,
+    InvalidPasswordError,
+    UnsafeArchiveEntryError,
+)
 from packnine.domain.value_objects import DuplicatePolicy
 from packnine.application.password_book import PasswordBook
 from packnine.application.recent_files_service import RecentFilesService
@@ -449,6 +453,8 @@ class MainWindow(QMainWindow):
             )
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
         except Exception as exc:  # noqa: BLE001 - 애플리케이션 크래시 방지를 위해 광범위하게 처리
             self._show_error(exc)
         else:
@@ -517,6 +523,8 @@ class MainWindow(QMainWindow):
             )
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "테스트 실패", f"아카이브 무결성 테스트에 실패했습니다:\n{exc}")
         else:
@@ -594,6 +602,8 @@ class MainWindow(QMainWindow):
             completed = self._execute_with_password_retry(_add)
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
         except Exception as exc:  # noqa: BLE001
             self._show_error(exc)
         else:
@@ -638,6 +648,8 @@ class MainWindow(QMainWindow):
             completed = self._execute_with_password_retry(_remove)
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
         except Exception as exc:  # noqa: BLE001
             self._show_error(exc)
         else:
@@ -727,6 +739,8 @@ class MainWindow(QMainWindow):
             )
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
         except Exception as exc:  # noqa: BLE001 - 크래시 대신 메시지로 알린다
             self._show_error(exc)
         else:
@@ -797,6 +811,8 @@ class MainWindow(QMainWindow):
             )
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
         except Exception as exc:  # noqa: BLE001
             self._show_error(exc)
         else:
@@ -831,6 +847,8 @@ class MainWindow(QMainWindow):
             completed = self._execute_with_password_retry(_list)
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
         except Exception as exc:  # noqa: BLE001
             self._show_error(exc)
         else:
@@ -1259,6 +1277,8 @@ class MainWindow(QMainWindow):
             )
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return []
         except Exception as exc:  # noqa: BLE001 - 드래그 중 크래시 대신 메시지로 알린다
@@ -1287,6 +1307,8 @@ class MainWindow(QMainWindow):
             )
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return
         except Exception as exc:  # noqa: BLE001
@@ -1333,6 +1355,8 @@ class MainWindow(QMainWindow):
                 return
         except UnsafeArchiveEntryError as exc:
             self._show_security_warning(exc)
+        except InsufficientDiskSpaceError as exc:
+            self._show_disk_space_warning(exc)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return
         except Exception as exc:  # noqa: BLE001
@@ -1382,6 +1406,18 @@ class MainWindow(QMainWindow):
 
     def _show_security_warning(self, exc: UnsafeArchiveEntryError) -> None:
         QMessageBox.critical(self, "보안 경고", str(exc))
+
+    def _show_disk_space_warning(self, exc: InsufficientDiskSpaceError) -> None:
+        """용량 부족은 "보안 경고"가 아니라 "공간 부족"으로 알린다.
+
+        같은 창으로 띄우면 사용자가 정상 파일을 악성으로 오해한다. 해야 할 일도
+        다르다 - 보안 경고는 파일을 의심해야 하고, 이건 공간을 비우면 된다.
+        """
+        QMessageBox.warning(
+            self,
+            "저장 공간 부족",
+            f"{exc}\n\n다른 드라이브를 고르거나 공간을 확보한 뒤 다시 시도하십시오.",
+        )
 
     # ------------------------------------------------------------------
     # 드래그 앤 드롭

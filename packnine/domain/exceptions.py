@@ -34,3 +34,36 @@ class CorruptedArchiveError(Exception):
 
 class ExternalToolMissingError(Exception):
     """외부 실행 도구(7z.exe, unrar 등)를 찾을 수 없을 때 발생시킨다."""
+
+
+class InsufficientDiskSpaceError(Exception):
+    """해제 결과를 담을 디스크 여유 공간이 부족할 때 발생시킨다.
+
+    보안 문제(UnsafeArchiveEntryError)와 구분해서 던진다. 섞으면 사용자가 정상 파일을
+    악성으로 오해하고, 반대로 정말 위험한 아카이브를 "용량 문제"로 넘겨 버린다.
+
+    해제를 시작한 뒤 중간에 디스크가 차면 반쯤 쓰인 파일이 남고 어디까지 썼는지도
+    알 수 없다. 그래서 쓰기 전에 필요량과 여유량을 숫자로 들고 멈춘다.
+    """
+
+    def __init__(self, required_bytes: int, available_bytes: int) -> None:
+        self.required_bytes = required_bytes
+        self.available_bytes = available_bytes
+        shortfall = max(required_bytes - available_bytes, 0)
+        super().__init__(
+            f"디스크 여유 공간이 부족합니다: "
+            f"필요 {_as_human_size(required_bytes)}, 여유 {_as_human_size(available_bytes)} "
+            f"({_as_human_size(shortfall)} 더 필요)"
+        )
+
+
+def _as_human_size(size: int) -> str:
+    """바이트 수를 사람이 읽을 단위로 바꾼다(메시지 전용)."""
+    if size < 1024:
+        return f"{size}B"
+    for unit in ("KiB", "MiB", "GiB"):
+        size_in_unit = size / 1024
+        if size_in_unit < 1024 or unit == "GiB":
+            return f"{size_in_unit:.1f}{unit}"
+        size = int(size_in_unit)
+    return f"{size}B"

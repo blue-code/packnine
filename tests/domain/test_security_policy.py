@@ -151,9 +151,15 @@ class TestValidateManifest:
             policy.validate_manifest(manifest)
         assert exc_info.value.entry_name == "__manifest__"
 
-    def test_default_manifest_limit_is_ten_gb(self):
+    def test_absolute_total_limit_is_opt_in(self):
+        """절대 용량 상한은 기본으로 걸지 않는다.
+
+        예전에는 10GiB 절대 상한이 기본값이었는데, 압증 없이 단지 담아 둔 동영상 모음처럼
+        압축폭학폭탄과 무관한 아카이부까지 "안전하지 않음"으로 막아 버렸다. 압축폭학폭탄의
+        본질은 절대 크기가 아니라 효상률이라 상한을 호출자가 필요할 때만 주도록 바꿨다.
+        """
         policy = ArchiveSecurityPolicy()
-        assert policy.max_total_uncompressed_size == 10 * 1024 * 1024 * 1024
+        assert policy.max_total_uncompressed_size is None
 
 
 class TestAlternateDataStreamRejection:
@@ -230,3 +236,130 @@ class TestUnsafeArchiveEntryErrorMessage:
         assert "경로 탈출 시도" in str(error)
         assert error.entry_name == "evil.exe"
         assert error.reason == "경로 탈출 시도"
+
+
+class TestValidateManifestCompressionBomb:
+    """전체 팽창률 기준 압축폭탄 검사.
+
+    엔트리 하나하나는 압축률 상한 안에 있어도 그런 엔트리를 수만 개 모으면 디스크를
+    가득 채울 수 있다. 그래서 엔트리별 압축률과 별개로 합계 팽창률에도 상한을 둔다.
+    """
+
+    def test_stored_large_archive_passes(self):
+        """압축하지 않고 담은 대용량 아카이브는 통과해야 한다.
+
+        실제로 막혔던 사례다. 동영상 16개를 STORED로 담은 10.6GiB zip은 팽창률이 1.0이라
+        압축폭탄일 수가 없다 - 출력이 이미 입력만큼 크기 때문이다.
+        """
+        entries = [
+            ArchiveEntry(
+                name=f"ep{index:02d}.mkv", size=700_000_000, compressed_size=700_000_000
+            )
+            for index in range(16)
+        ]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        ArchiveSecurityPolicy().validate_manifest(manifest)  # 예외 없이 통과해야 함
+
+    def test_total_ratio_over_limit_raises(self):
+        """작은 아카이브가 거대하게 부풀면 거부한다."""
+        policy = ArchiveSecurityPolicy(
+            max_total_compression_ratio=10.0, min_total_uncompressed_size=1000
+        )
+        entries = [ArchiveEntry(name="bomb.bin", size=1_000_000, compressed_size=1000)]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        with pytest.raises(UnsafeArchiveEntryError) as exc_info:
+            policy.validate_manifest(manifest)
+        assert exc_info.value.entry_name == "__manifest__"
+        assert "팽창률" in exc_info.value.reason
+
+    def test_many_entries_each_within_entry_ratio_still_caught(self):
+        """엔트리별 압축률은 통과하는데 합계가 과도한 경우를 잡는다."""
+        policy = ArchiveSecurityPolicy(min_total_uncompressed_size=1000)
+        # 엔트리별 압축률 50은 엔트리 상한(100) 안이지만, 100개가 모이면 전체 상한을 넘는다.
+        entries = [
+            ArchiveEntry(name=f"f{index}.txt", size=50_000, compressed_size=1000)
+            for index in range(100)
+        ]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        with pytest.raises(UnsafeArchiveEntryError):
+            policy.validate_manifest(manifest)
+
+    def test_small_archive_under_allowance_floor_passes(self):
+        """작은 아카이브는 팽창률이 높아도 허용 하한까지는 통과시킨다.
+
+        텍스트 로그를 묶은 gzip은 팽창률이 100을 넘기도 한다. 결과물이 몇백 MB면
+        디스크를 위협하지 않으므로 비율만으로 막으면 과잉 차단이 된다.
+        """
+        policy = ArchiveSecurityPolicy(min_total_uncompressed_size=500_000_000)
+        entries = [
+            ArchiveEntry(name="logs.txt", size=400_000_000, compressed_size=1_000_000)
+        ]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        policy.validate_manifest(manifest)  # 예외 없이 통과해야 함
+
+    def test_empty_manifest_passes(self):
+        manifest = ArchiveManifest(entries=[], format_name="zip")
+        ArchiveSecurityPolicy().validate_manifest(manifest)
+
+    def test_absolute_limit_still_applies_when_given(self):
+        """호출자가 절대 상한을 주면 팽창률과 무관하게 그 상한이 걸린다."""
+        policy = ArchiveSecurityPolicy(max_total_uncompressed_size=1000)
+        entries = [ArchiveEntry(name="big.bin", size=2000, compressed_size=2000)]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        with pytest.raises(UnsafeArchiveEntryError):
+            policy.validate_manifest(manifest)
+
+    def test_default_total_ratio_limit(self):
+        policy = ArchiveSecurityPolicy()
+        assert policy.max_total_compression_ratio == 20.0
+
+    def test_default_allowance_floor_is_ten_gib(self):
+        """하한은 0.13.0까지 '절대 상한'이던 10GiB를 뒤집어 '바닥'으로 쓴다."""
+        policy = ArchiveSecurityPolicy()
+        assert policy.min_total_uncompressed_size == 10 * 1024 * 1024 * 1024
+
+    def test_well_compressing_text_archive_is_not_blocked(self):
+        """잘 줄어든 텍스트 묶음을 과잉 차단하지 않는다.
+
+        50MB zip이 2GB로 풀리면 팽창률 40이다. 전체 상한(20)만 보면 걸리지만 이건
+        악의가 아니라 로그/덤프가 잘 줄어든 결과이고, 2GB는 디스크를 위협하지 않는다.
+        """
+        entries = [
+            ArchiveEntry(name="dump.sql", size=2_000_000_000, compressed_size=50_000_000)
+        ]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        ArchiveSecurityPolicy().validate_manifest(manifest)  # 예외 없이 통과해야 함
+
+    def test_real_bomb_above_floor_is_still_blocked(self):
+        """하한을 올려도 진짜 압축폭탄은 계속 막힌다.
+
+        10MB가 500GB로 부푸는 경우다. 하한(10GiB)을 훌쩍 넘고 팽창률도 5만이다.
+        """
+        entries = [
+            ArchiveEntry(
+                name="bomb.bin", size=500 * 1024**3, compressed_size=10 * 1024**2
+            )
+        ]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        with pytest.raises(UnsafeArchiveEntryError):
+            ArchiveSecurityPolicy().validate_manifest(manifest)
+
+    def test_large_archive_expanding_far_beyond_its_size_is_blocked(self):
+        """아카이브가 커도 팽창률이 과하면 막는다(10GB → 500GB)."""
+        entries = [
+            ArchiveEntry(
+                name="big.bin", size=500 * 1024**3, compressed_size=10 * 1024**3
+            )
+        ]
+        manifest = ArchiveManifest(entries=entries, format_name="zip")
+        with pytest.raises(UnsafeArchiveEntryError):
+            ArchiveSecurityPolicy().validate_manifest(manifest)
+
+    def test_total_ratio_limit_must_be_below_entry_ratio_limit_to_matter(self):
+        """전체 팽창률은 엔트리별 팽창률의 가중평균이라는 전제를 못 박아 둔다.
+
+        두 상한을 같게 두면 엔트리 검사를 통과한 아카이브는 전체 검사도 항상 통과해
+        이 검사가 죽은 코드가 된다. 기본값이 그렇게 바뀌는 것을 막는다.
+        """
+        policy = ArchiveSecurityPolicy()
+        assert policy.max_total_compression_ratio < policy.max_compression_ratio
